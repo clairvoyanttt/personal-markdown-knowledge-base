@@ -1,0 +1,21 @@
+name: Python Windows baseline
+on:
+  push:
+    branches: [main, 'chore/**', 'feature/**', 'fix/**']
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  baseline:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install pinned runtime and editable project
+        run: |
+          python -m pip install -r requirements.txt
+          python -m pip install -e .
+      - name: Syntax, dependencies and baseline tests (not V01-V16)
+        run: python scripts/check.py
