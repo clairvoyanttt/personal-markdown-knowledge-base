@@ -23,7 +23,7 @@
 - A：CollectionCoordinator，prepare_activation / complete_activation / cancel_activation。
 - B：NoteService（create_draft/load_note/apply_draft_edit/save_note）和CommitResolver（check_commit/close_unconfirmed_session）；C提供存储证据。
 - D：BackupService.backup_collection；C提供一致快照。
-- C牵头API04/05/10；B牵头API03/06；D牵头API07/09。未落成的精确Python签名先由提供方/调用方核对并交A审查，不能把概念契约误记为已编译接口。
+- C牵头API04/05/10；B牵头API03/06；D牵头API07/09。未落成的精确Python签名先由提供方/调用方核对并交AI助手技术审查，不能把概念契约误记为已编译接口。
 
 ## 结果状态
 
@@ -41,4 +41,4 @@ CallContext集合标识/代次+草稿edit_version/保存base_revision分别检�
 
 ## 接口变更
 
-PR写旧/新字段、可空性、错误状态、调用方影响和真实回归。提供方和调用方共同核对，A统一最终人工审查并决定合并；A协调公共目录。不要混入[v3待同步](pending-requirement-sync.md)规则。
+PR写旧/新字段、可空性、错误状态、调用方影响和真实回归。提供方和调用方共同核对，AI助手统一技术审查并报告，合并按A授权执行；A协调公共目录。不要混入[v3待同步](pending-requirement-sync.md)规则。
