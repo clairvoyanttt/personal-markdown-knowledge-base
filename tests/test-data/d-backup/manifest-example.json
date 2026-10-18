@@ -1,0 +1,18 @@
+{
+  "formatVersion": 1,
+  "schemaVersion": 1,
+  "snapshotEntry": "snapshot.sqlite",
+  "sourceCollectionId": "0123456789abcdef0123456789abcdef",
+  "sourceLocation": "C:\\synthetic\\课程集合",
+  "backupCapturedAtUtc": "2026-10-18T07:08:09.123456Z",
+  "sourceCollectionRevision": 42,
+  "savedNoteCount": 2,
+  "referenceCounts": {
+    "valid": 4,
+    "deleted": 2,
+    "missing": 1,
+    "foreign": 3
+  },
+  "snapshotSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "snapshotSizeBytes": 8192
+}
