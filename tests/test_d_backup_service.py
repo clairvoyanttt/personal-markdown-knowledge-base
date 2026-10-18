@@ -80,7 +80,7 @@ class BackupServiceTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
-        self.target = Path(self.temporary.name) / "备份.zip"
+        self.target = Path(self.temporary.name).resolve(strict=True) / "备份.zip"
         self.session, self.source = Session(), Source()
 
     def service(self):
@@ -111,6 +111,94 @@ class BackupServiceTests(unittest.IsolatedAsyncioTestCase):
         reply = await self.service().backup_collection(self.request())
         self.assertEqual(reply.status, ResultStatus.OK)
         self.assertEqual(reply.value.saved_note_count, 0)
+
+    async def test_parent_alias_is_canonicalized_before_publication(self):
+        # Model a Windows 8.3 TEMP alias without needing short-name support or
+        # symlink privileges on this machine. The real ZIP writer runs below.
+        alias = self.target.parent / "synthetic-short-parent-alias"
+        original_resolve = Path.resolve
+
+        def resolve(path, *args, **kwargs):
+            if path == alias:
+                return self.target.parent
+            return original_resolve(path, *args, **kwargs)
+
+        with patch.object(Path, "resolve", autospec=True, side_effect=resolve):
+            request = replace(self.request(), destination_file=str(alias / self.target.name))
+            reply = await self.service().backup_collection(request)
+        self.assertEqual(reply.status, ResultStatus.OK)
+        self.assertEqual(reply.value.destination_file, str(self.target))
+        self.assertEqual(inspect_package(self.target, MANIFEST_POLICY, ARCHIVE_POLICY).manifest,
+                         self.source.captured.manifest)
+
+    async def test_parent_alias_preserves_known_error_outcomes(self):
+        alias = self.target.parent / "synthetic-short-parent-alias"
+        original_resolve = Path.resolve
+
+        def resolve(path, *args, **kwargs):
+            if path == alias:
+                return self.target.parent
+            return original_resolve(path, *args, **kwargs)
+
+        for failure in ("target_exists", "snapshot_mismatch"):
+            with self.subTest(failure=failure):
+                if failure == "target_exists":
+                    self.target.write_bytes(b"previous synthetic data")
+                else:
+                    self.target.unlink()
+                    captured = lease()
+                    self.source.captured = replace(captured,
+                        manifest=replace(captured.manifest, snapshot_sha256="0" * 64),
+                        facts=replace(captured.facts, snapshot_sha256="0" * 64))
+                with patch.object(Path, "resolve", autospec=True, side_effect=resolve):
+                    request = replace(self.request(), destination_file=str(alias / self.target.name))
+                    reply = await self.service().backup_collection(request)
+                self.assertEqual(reply.status, ResultStatus.ERROR)
+                self.assertIsNone(reply.value)
+                if failure == "target_exists":
+                    self.assertEqual(reply.error.code, "TARGET_EXISTS")
+                    self.assertEqual(self.target.read_bytes(), b"previous synthetic data")
+                else:
+                    self.assertFalse(self.target.exists())
+
+    async def test_same_basename_in_another_parent_receipt_stays_unknown(self):
+        wrong = self.target.parent / "another-parent" / self.target.name
+        with patch("pmkb.application.backup_restore.backup_service.publish_package",
+                   return_value=PublicationResult(ResultStatus.OK, wrong, byte_count=25)):
+            reply = await self.service().backup_collection(self.request())
+        self.assertEqual(reply.status, ResultStatus.UNCONFIRMED)
+        self.assertEqual(reply.value.publication_state, FilePublicationState.UNKNOWN)
+        self.assertFalse(self.target.exists())
+
+    async def test_parent_resolution_failure_precedes_capture_and_publication(self):
+        with patch.object(Path, "resolve", side_effect=OSError("synthetic parent failure")), patch(
+                "pmkb.application.backup_restore.backup_service.publish_package") as publisher:
+            reply = await self.service().backup_collection(self.request())
+        self.assertEqual(reply.status, ResultStatus.ERROR)
+        self.assertIsNone(reply.value)
+        self.assertEqual(self.source.calls, [])
+        publisher.assert_not_called()
+        self.assertFalse(self.target.exists())
+
+    async def test_parent_resolution_runs_off_loop_and_cancellation_prevents_capture(self):
+        import threading
+        owner = threading.get_ident()
+        cancel = Event()
+        original_resolve = Path.resolve
+
+        def resolve(path, *args, **kwargs):
+            self.assertNotEqual(threading.get_ident(), owner)
+            resolved = original_resolve(path, *args, **kwargs)
+            cancel.set()
+            return resolved
+
+        with patch.object(Path, "resolve", autospec=True, side_effect=resolve), patch(
+                "pmkb.application.backup_restore.backup_service.publish_package") as publisher:
+            reply = await self.service().backup_collection(self.request(), cancel)
+        self.assertEqual(reply.status, ResultStatus.CANCELLED)
+        self.assertEqual(self.source.calls, [])
+        publisher.assert_not_called()
+        self.assertFalse(self.target.exists())
 
     async def test_return_to_save_does_not_capture_publish_or_save(self):
         reply = await self.service().backup_collection(self.request(Choice.RETURN_TO_SAVE))

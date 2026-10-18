@@ -66,6 +66,19 @@ def _unknown_error() -> AppError:
                   "Inspect the reported target; do not replay, overwrite, delete it or use SAVE verification.")
 
 
+def _canonical_target(target: Path) -> Path:
+    """Match the file layer's parent spelling without following the final leaf.
+
+    Windows TEMP may use an 8.3 parent alias. Resolve that existing directory
+    before publication so the receipt can still be checked by exact path.
+    A failure here proves publication has not been attempted.
+    """
+    parent = target.parent.resolve(strict=True)
+    if not parent.is_dir():
+        raise NotADirectoryError("Output parent must be an existing directory.")
+    return parent / target.name
+
+
 class BackupServiceImpl:
     """API08 implementation; public DTOs are stable, these injected ports are not.
 
@@ -152,6 +165,9 @@ class BackupServiceImpl:
             before = await settle(self._session.inspect(), signal)
             validate_state(before, context)
             validate_choice(before, request.unsaved_choice)
+            if signal.is_set():
+                return result(context, ResultStatus.CANCELLED)
+            target = await run_io(lambda: _canonical_target(target), signal)
             if signal.is_set():
                 return result(context, ResultStatus.CANCELLED)
             # A second capture catches new drafts after an initial NO_UNSAVED or
