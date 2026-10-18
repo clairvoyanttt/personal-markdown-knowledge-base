@@ -46,8 +46,8 @@ py -3.12 -m venv .venv
 | B 界面/草稿保存 | `src/pmkb/desktop`、`application/editing` |
 | C 规则/解析/查询/数据库 | `domain`、`application/parsing`、`application/query`、`infrastructure/storage` |
 | D 导出/备份恢复/文件 | `application/export`、`application/backup_restore`、`infrastructure/file_io` |
-| 共同契约 | `src/pmkb/contracts`，改动需提供方及调用方共同审查 |
+| 共同契约 | `src/pmkb/contracts`，改动需提供方及调用方共同核对，最终审查由A负责 |
 
 需求和原设计由A个人完成，不记为团队共同历史成果。B/C/D账号和权限待关联，不代替成员认领或审核。首版不含同步、移动端、插件/主题、多人协作、AI/OCR、自动保存或集合合并；团队Git协作不等于产品协作功能。
 
-不上传个人笔记、本地库、密钥、构建产物、私人记录或课程ZIP。没有声称分支保护已开启；CI定义的实际运行状态以Actions为准。发布的启动分支经至少一名非作者组员审查后合并main。
+不上传个人笔记、本地库、密钥、构建产物、私人记录或课程ZIP。没有声称分支保护已开启；CI定义的实际运行状态以Actions为准。所有PR由A统一人工审查后决定是否合并main，包括A自己的PR；本次流程调整不代表启动PR #5已获批准。

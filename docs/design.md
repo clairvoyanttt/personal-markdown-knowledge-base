@@ -98,7 +98,7 @@ flowchart TB
 
 沿用INVALID_NAME、DUPLICATE_NAME、INVALID_TAG、TAG_LIMIT、REVISION_CONFLICT、NO_SAVED_VERSION、TARGET_EXISTS、TARGET_NOT_EMPTY、INVALID_BACKUP、SCHEMA_UNSUPPORTED、STALE_CONTEXT、COMMIT_UNCONFIRMED，以及设计细化INVALID_ARGUMENT、NOTE_NOT_FOUND、IO_FAILURE、STATE_BLOCKED。错误含原因和下一步，不暴露正文/SQL堆栈。DELETED/MISSING/FOREIGN_COLLECTION是业务分类，不统一报损坏。
 
-外部接口只有本地Windows文件/ZIP、sqlite3及解析库；没有后端账号/网络服务。API03—07/09/10精确Python对象由提供方与调用方先审查，未完成前不返回随意字典作为稳定契约。
+外部接口只有本地Windows文件/ZIP、sqlite3及解析库；没有后端账号/网络服务。API03—07/09/10精确Python对象由提供方与调用方先核对，再交A统一审查，未完成前不返回随意字典作为稳定契约。
 
 ## 6. 核心流程与异常
 
