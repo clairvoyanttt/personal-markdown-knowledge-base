@@ -47,13 +47,13 @@ flowchart TB
 ## 3. 运行、线程与取消
 
 - Qt主线程仅处理界面与受控最终激活，禁止执行阻塞数据库/归档或等待future.result。
-- 设计使用一个后台asyncio事件循环接收异步服务调用，Qt通过工作线程结果信号回到主线程；此桥接尚待B/A实现，不假定Qt原生事件循环自动支持async def。
+- 已实现AsyncServiceRuntime单后台asyncio循环与QtDispatcher排队主线程回调；ApplicationServices显式接入B的CollectionSession、绝对配置路径及运行器。启动壳已接入关闭收尾，真实编辑会话仍由B接线；不假定Qt原生事件循环自动支持async def。
 - 每集合写/一致快照/核实由串行存储队列调度到拥有该连接的工作线程；sqlite3连接不跨线程分享，不用check_same_thread=False代替串行设计。
 - 文件任务消费冻结快照；解析/查询带集合代次、请求/编辑版本。主线程回调只应用匹配的结果。
 - API的可选threading.Event表示协作取消意图。asyncio.CancelledError或Event置位不证明COMMIT回滚；持久化发出后先确认结果或进入UNCONFIRMED。不让外层future取消自动中断证据核实；服务收尾必须保留PendingSave并提供结果。
 - 退出待在途数据库调用结束后，再检查当前上下文和全部buffer版本；明确未知退出要重新说明内存丢失风险。UI关闭前最终检查不能只在后台做一次。
 
-这些是Python对应的运行设计，尚无完整线程桥/存储队列实现。ActiveContextGate只有带锁的最终内存切换/旧结果匹配，不证明文件已经发布或草稿已处理。
+运行桥、显式组装与资源收尾已实现，见[运行接入说明](development/qt-runtime.md)。退出先由B收束业务并核实最新草稿/未知保存，再关闭运行器；当前窗口只演示无编辑器的资源关闭。C的串行存储队列、B真实草稿及完整F09尚未实现。ActiveContextGate只负责最终内存切换，不能代替文件/草稿检查。
 
 ## 4. 数据模型与一致性
 

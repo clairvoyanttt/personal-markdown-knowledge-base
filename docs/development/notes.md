@@ -84,7 +84,8 @@ py -3.12 -m venv .venv
 - B：`src/pmkb/desktop`、`src/pmkb/application/editing`。
 - C：`src/pmkb/domain`、`application/parsing`、`application/query`、`infrastructure/storage`，后四项均在`src/pmkb`下。
 - D：`src/pmkb/application/export`、`application/backup_restore`、`infrastructure/file_io`，均在`src/pmkb`下。
-- A：`src/pmkb/application/collection`、检查和集成脚本。
+- A：`src/pmkb/application/collection`、`application/runtime.py`、`desktop/dispatcher.py`、`desktop/composition.py`、检查和集成脚本。
+- B接线先读[后台运行/Qt回调/退出](qt-runtime.md)：真实编辑器必须显式提供会话；不能直接套用无编辑器启动壳的退出逻辑。
 - 共同类型：`src/pmkb/contracts`；测试：`tests`。自己的模块由自己补测试和说明，不把所有测试交给D或所有文档交给A。
 
 ## 6. 写代码之前先约定接口
