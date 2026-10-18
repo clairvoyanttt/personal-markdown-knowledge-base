@@ -10,6 +10,7 @@ Windows 11 个人本地 Markdown 笔记与知识管理工具，面向学生与�
 
 ## 队友先看这些
 
+- **[第一次接手：操作清单与注意事项](docs/development/notes.md)**
 - [四人计划与分工](docs/team-plan.md)：按依赖尽快推进，不等待原拟定五周。
 - **[B：界面与编辑保存](docs/tasks/B-ui-editing.md)**
 - **[C：存储、检索与引用](docs/tasks/C-storage-search-references.md)**
