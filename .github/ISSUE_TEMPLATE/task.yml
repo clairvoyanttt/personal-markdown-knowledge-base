@@ -1,0 +1,30 @@
+name: 团队任务
+description: 小任务、交付物和验收条件
+body:
+  - type: input
+    id: owner
+    attributes:
+      label: 负责人（A/B/C/D及GitHub账号）
+      description: 必须由本人确认认领，不替别人填写已接受。
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: 任务、FR/NFR及交付物
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: 验收条件、相关V编号与拟检查方法
+    validations:
+      required: true
+  - type: textarea
+    id: dependencies
+    attributes:
+      label: 接口、协作方与前置依赖
+  - type: textarea
+    id: actual
+    attributes:
+      label: 实际进度、检查结果及未执行项

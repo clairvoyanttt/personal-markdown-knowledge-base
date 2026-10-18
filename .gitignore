@@ -1,0 +1,35 @@
+# Python environment/cache/build output
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+build/
+dist/
+artifacts/
+.coverage
+htmlcov/
+# IDE and previous build output
+.vs/
+.idea/
+**/bin/
+**/obj/
+*.user
+# Personal data / local databases / secrets / course packages
+*.sqlite
+*.sqlite-*
+*.db
+*.db-*
+*.pmkb
+*.zip
+*.log
+personal-notes/
+private/
+.env
+.env.*
+!.env.example
+.superpowers/
+.worktrees/
