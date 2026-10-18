@@ -15,6 +15,7 @@ Windows 11 个人本地 Markdown 笔记与知识管理工具，面向学生与�
 - **[B：界面与编辑保存](docs/tasks/B-ui-editing.md)**
 - **[C：存储、检索与引用](docs/tasks/C-storage-search-references.md)**
 - **[D：导出、备份与恢复](docs/tasks/D-export-backup-restore.md)**
+- [D 工作总清单与实际进度](docs/development/d-progress.md)：区分组件完成、独立待办、真实联调与产品验收。
 - [A：当前进度和后续集合任务](docs/tasks/A-baseline-integration.md)
 - [开发注意事项](docs/development/notes.md)、[Git协作](CONTRIBUTING.md)
 - [A集合模块接入与命令示例](docs/development/collection-lifecycle.md)
