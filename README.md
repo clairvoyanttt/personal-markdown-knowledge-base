@@ -6,7 +6,7 @@ Windows 11 个人本地 Markdown 笔记与知识管理工具，面向学生与�
 
 2026-10-18用户确认改用 **Python 3.12+ / PySide6 Qt Widgets / SQLite**，保持第一关第二版需求和业务范围；第一关v3暂不混入。C#方案已转为历史参考，未发布的C#骨架不保留在当前源码。
 
-目前可安装运行的是**开发启动壳**：公共类型契约、活动上下文保护、UTF16跨度转换和基础检查已具备；编辑保存、数据库、搜索引用、导出备份恢复尚未实现。基础检查不等于产品验收，V01—V16完整产品验证仍未执行。
+目前图形界面仍是**开发启动壳**。A的API01集合协调、真实空SQLite集合创建/只读打开、身份登记及保护边界已实现，提供开发命令入口；公共类型、上下文保护、UTF16转换和基础检查可用。笔记编辑保存/CRUD、搜索引用、导出备份恢复及Qt真实服务接线尚未完成。基础检查不等于产品验收，V01—V16完整产品验证仍未执行。
 
 ## 队友先看这些
 
@@ -17,6 +17,7 @@ Windows 11 个人本地 Markdown 笔记与知识管理工具，面向学生与�
 - **[D：导出、备份与恢复](docs/tasks/D-export-backup-restore.md)**
 - [A：当前进度和后续集合任务](docs/tasks/A-baseline-integration.md)
 - [开发注意事项](docs/development/notes.md)、[Git协作](CONTRIBUTING.md)
+- [A集合模块接入与命令示例](docs/development/collection-lifecycle.md)
 - [接口责任](docs/development/contracts.md)、[v3待同步](docs/development/pending-requirement-sync.md)
 
 ## 安装、检查、启动

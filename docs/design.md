@@ -4,7 +4,7 @@
 - 本轮决定：用户明确选择Python，保留需求/分工、按依赖尽快推进。采用Python3.12+、PySide6 Qt Widgets、每集合独立SQLite。
 - 需求依据：[第一关第二版需求](requirements.md)，FR01—FR11、FR16、NFR01—NFR06共18条。原需求未改写；v3提示/时间/扩充验收另列[待同步](development/pending-requirement-sync.md)。
 - 历史来源：[C#设计第二版](archive/design-csharp-v2.md)保留原稿与历史SQL受限记录，其WPF/.NET签名不作为当前技术契约；本文件列出当前映射和业务不变量，具体Python类型在源码中可查。
-- 实施状态：只有工程骨架、公共类型、上下文门禁和跨度转换、Qt启动壳及基础检查；业务服务、SQLite/解析适配尚未实现。V01—V16完整产品验证未执行。
+- 实施状态：已有工程骨架、API01协调器、真实空集合目录适配/身份登记、公共类型、上下文门禁与跨度转换、Qt启动壳和模块检查；编辑保存/CRUD、查询解析及输出恢复未完成，Qt集合流程尚待B接线。V01—V16完整产品验证未执行。
 
 ## 1. 范围与设计选择
 
@@ -35,7 +35,7 @@ flowchart TB
 | 模块 | 负责人/包 | 职责与限制 |
 |---|---|---|
 | M01 | B / desktop | 入口、状态、确认、异步结果展示 |
-| M02 | A / application.collection | 创建/打开/切换、发布/登记/激活及草稿保护；当前只有门禁组件 |
+| M02 | A / application.collection | 创建/打开/切换、发布/登记/激活编排已实现；B的真实编辑器/Qt激活端口尚待接入 |
 | M03 | B / application.editing | 草稿、保存/删除、核实/退出编排；C提供事务证据 |
 | M04 | C / application.parsing | 统一解析、保护跨度和引用分类，无持久化副作用 |
 | M05 | C / application.query | 只查询保存版，标签/正文/反向引用 |
@@ -194,3 +194,9 @@ V01名称标签；V02保存版本；V03预览；V04查询；V05引用；V06删�
 本轮用户确认语言切换，改变工程/界面/类型/取消/部署实现方式，不改变18条需求及15高/3中优先级；旧.NETTrim/Task/CancellationToken等按本文映射，不静默使用Python不同默认语义。第一关v3仍待整体同步。尚未选定的解析库、发行工具和未完成接口由对应工作包通过PR对齐，不能被写成已实现。
 
 技术说明参考：[Qt for Python](https://doc.qt.io/qtforpython-6/gettingstarted.html)、[sqlite3事务控制](https://docs.python.org/3.12/library/sqlite3.html)、[asyncio取消](https://docs.python.org/3.12/library/asyncio-task.html#task-cancellation)。上述资料支持技术行为，人员分工及业务决定来自项目讨论，不标成老师原题。
+
+## 11. 本轮A模块实施记录（2026-10-18）
+
+新增API01协调与内部窄端口，不改变已有公开API01字段/编号。当前真实适配以同目录独占硬链接进行非覆盖发布；不支持该能力的文件系统安全拒绝，不退化为覆盖式replace。身份登记用配置旁锁文件及独占临时写入/替换，未知结果保留三态。空集合schema.sql由批准的DDL转录，当前没有笔记CRUD；目录检查包含元数据、表/列、关键关系/唯一键/触发器存在及SQLite完整性，未声称完成所有笔记历史业务语义校验。
+
+本轮53项自动检查已真实通过，包含真实临时文件/SQLite和受控端口故障分支；不等于V01—V16整组产品验收。特别是B保存/未知提交和Qt线程激活以测试会话检查契约，真实联调仍未执行。命令与队友接入见[集合流程](development/collection-lifecycle.md)。
