@@ -48,6 +48,27 @@ class CollectionCoordinatorService:
         self.backend, self.registry, self.session = backend, registry, session
         self._lock = asyncio.Lock()
         self._tickets: dict[str, _Ticket] = {}
+        self._closed = False
+
+    async def close(self):
+        """Runtime finalizer, after all accepted operations have settled.
+
+        Clean only owned candidates. Published and uncertain artifacts survive;
+        this is resource disposal, not approval to discard editor drafts.
+        """
+        signal = Event()
+        async with self._serialized(signal):
+            self._closed = True
+            warnings = []
+            for ticket in self._tickets.values():
+                before = len(ticket.warnings)
+                await self._cleanup(ticket, signal)
+                ticket.finished = True
+                warnings.extend(ticket.warnings[before:])
+                if ticket.stage == TargetStage.UNKNOWN:
+                    warnings.append(AppError('IO_FAILURE', 'Unconfirmed publication was retained.', 'Inspect the target; do not delete it as a temporary file.'))
+            if warnings:
+                raise CollectionFailure('IO_FAILURE', 'Some candidate resources require manual inspection.', 'Inspect the reported operation stages and target locations.')
 
     @staticmethod
     async def _settle(awaitable, signal: Event):
@@ -72,6 +93,8 @@ class CollectionCoordinatorService:
         return await self._settle(asyncio.to_thread(method, *args), signal)
 
     def _context(self, context):
+        if self._closed:
+            raise CollectionFailure('STATE_BLOCKED', 'The collection service has closed.')
         if not ActiveContextGate._valid_context(context):
             raise CollectionFailure("INVALID_ARGUMENT", "Invalid call context.")
         if self.session.context != context:
