@@ -8,9 +8,9 @@
 
 项目是Windows11上个人本地、离线的Markdown笔记工具。当前采用 **Python3.12 / PySide6 Qt Widgets / SQLite**，不是旧C#或WPF方案。
 
-已有：Python工程结构、API01/02/08/11公共类型、活动上下文保护、UTF16跨度转换、开发启动窗口和基础检查。基线发布时，本地15项基础检查已通过；这不代表完整笔记功能已经实现。
+已有：Python工程结构、API01/02/08/11公共类型、活动上下文保护、UTF16跨度转换、开发启动窗口和基础检查；A新增集合流程见`docs/development/collection-lifecycle.md`。基线发布时，本地15项基础检查已通过；这不代表完整笔记功能已经实现。
 
-尚未实现：完整集合生命周期、编辑保存、SQLite业务存储、搜索/引用、导出备份恢复。V01—V16完整产品验收均未执行。窗口暂时只有说明文字是正常现状，不要为了演示伪造保存成功或显示假数据作为正式结果。
+尚未完成：集合流程的真实Qt/编辑器接线、编辑保存、笔记SQLite CRUD/完整业务校验、搜索/引用、导出备份恢复。V01—V16完整产品验收均未执行。窗口暂时只有说明文字是正常现状，不要为了演示伪造保存成功或显示假数据作为正式结果。
 
 需求与原设计由A个人先完成，不是四人共同完成的历史成果。团队现在开始在共同基线上实现；实际进度以Issue、源码和真实检查记录为准。
 
@@ -24,29 +24,23 @@
 
 ## 3. 第一次获取项目：用正确分支
 
-本次启动代码在 **`chore/a-team-baseline`**，通过[PR #5](https://github.com/clairvoyanttt/personal-markdown-knowledge-base/pull/5)申请合并到main。用户现已明确同意合并，执行前由AI完成最新技术检查，不能默认main已经有这些代码。
+启动基线[PR #5](https://github.com/clairvoyanttt/personal-markdown-knowledge-base/pull/5)已合并。日常从**main**获取已集成代码，不再从旧启动分支取新功能。
 
-没有本地仓库时，在自己准备放项目的父目录运行：
+没有本地仓库时，在准备放项目的父目录运行：
 
 ```powershell
-git clone --branch chore/a-team-baseline https://github.com/clairvoyanttt/personal-markdown-knowledge-base.git
+git clone https://github.com/clairvoyanttt/personal-markdown-knowledge-base.git
 cd personal-markdown-knowledge-base
 ```
 
-已经克隆时，先保存自己的改动；工作区有未处理修改时，不要直接切分支、reset或覆盖文件。工作区可安全切换后：
+已经克隆时，先妥善保存自己的修改；工作区可安全切换后：
 
 ```powershell
-git fetch origin
-git switch chore/a-team-baseline
+git switch main
+git pull --ff-only
 ```
 
-如果本地还没有该分支，可用：
-
-```powershell
-git switch --track origin/chore/a-team-baseline
-```
-
-不必重复运行两种switch命令。若A已通知PR合入main，改用`git switch main`与`git pull --ff-only`取得集成代码；启动分支以后可能被删除，以A明确通知和PR实际状态为准，不从旧ZIP复制文件。
+未合并的新功能以对应PR状态为准，需要联调时在个人分支合入对应功能分支并注明依赖；不要复制旧ZIP，也不用reset/强推覆盖自己或其他人的改动。
 
 ## 4. 安装、检查、启动：先跑通再开发
 
@@ -135,20 +129,15 @@ API03删除、API04查询、API05引用、API06预览、API07导出、API09恢�
 
 ### 8.1 建分支
 
-确认Issue和基线后，创建自己的短期分支。基线PR未合并时：
-
-```powershell
-git fetch origin
-git switch -c feature/b-2-draft origin/chore/a-team-baseline
-```
-
-B示例是Issue #2的一个小任务。C可用`feature/c-3-storage-contract`，D可用`feature/d-4-export-fixtures`。若基线已合并，改从更新后的main创建：
+确认Issue和基线后，从更新的main创建自己的短期分支：
 
 ```powershell
 git switch main
 git pull --ff-only
 git switch -c feature/b-2-draft
 ```
+
+B示例是Issue #2的一个小任务。C可用`feature/c-3-storage-contract`，D可用`feature/d-4-export-fixtures`。需使用未合并的其他功能时，在PR中注明依赖并与提供方对齐。
 
 不要在main或公共基线分支上直接做日常开发。已有修改先妥善保存，不用reset/强推解决不会处理的状态。
 

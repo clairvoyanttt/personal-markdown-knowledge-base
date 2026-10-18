@@ -42,3 +42,9 @@ CallContext集合标识/代次+草稿edit_version/保存base_revision分别检�
 ## 接口变更
 
 PR写旧/新字段、可空性、错误状态、调用方影响和真实回归。提供方和调用方共同核对，AI助手统一技术审查并报告，合并按A授权执行；A协调公共目录。不要混入[v3待同步](pending-requirement-sync.md)规则。
+
+## API01已实现的内部协作端口
+
+`application.collection.ports`定义CollectionBackend、IdentityRegistry、CollectionSession。A协调器实现公开CollectionCoordinator Protocol；B实现CollectionSession的buffer快照、保存和最终Qt线程激活；C/D可复用或替换最小本地适配，但须保持实际状态/异常语义。激活前必须在同一UI回调中复核cancel_signals、Context和全部buffer状态，安装成功后才放弃明确选择的草稿。
+
+HeadlessCollectionSession只供无编辑器的开发命令使用，不得接到已经存在真实草稿的界面。端口及当前限制见[集合接入](collection-lifecycle.md)。
