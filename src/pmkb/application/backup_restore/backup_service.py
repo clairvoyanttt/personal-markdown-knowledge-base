@@ -26,7 +26,7 @@ from pmkb.infrastructure.file_io.windows_names import validate_windows_basename
 from pmkb.infrastructure.file_io.zip_guard import ArchivePolicy
 from .manifest import (
     BackupManifest, ManifestPolicy, ManifestValidationError, SnapshotFacts,
-    check_manifest_against_facts, validate_manifest,
+    check_manifest_against_facts, encode_manifest, validate_manifest,
 )
 from .package_components import publish_package
 
@@ -180,6 +180,12 @@ class BackupServiceImpl:
             if isinstance(captured, SnapshotLease):
                 snapshot = captured  # Release even a structurally invalid lease.
             self._validate_snapshot(captured, context)
+            if not signal.is_set():
+                # Encoding is pure preparation: a budget/codec failure here is
+                # definitely before allocation or publication, not UNKNOWN.
+                # The standalone package entry point deliberately repeats this
+                # deterministic check for callers that do not use this service.
+                await run_io(lambda: encode_manifest(snapshot.manifest, self._manifest_policy), signal)
             if signal.is_set():
                 outcome = result(context, ResultStatus.CANCELLED)
             else:

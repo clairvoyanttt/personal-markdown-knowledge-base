@@ -11,7 +11,8 @@ from unittest.mock import patch
 
 from pmkb.application.backup_restore.backup_service import BackupServiceImpl, SnapshotLease
 from pmkb.application.backup_restore.manifest import (
-    BackupManifest, ManifestPolicy, ReferenceCounts, SnapshotFacts,
+    BackupManifest, ManifestPolicy, ManifestValidationError, ReferenceCounts,
+    SnapshotFacts, encode_manifest,
 )
 from pmkb.application.backup_restore.package_components import inspect_package
 from pmkb.application.output_support import OutputBufferState, OutputFailure, OutputSessionState
@@ -102,6 +103,57 @@ class BackupServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.source.released, [self.source.captured])
         self.assertEqual(reply.request_context, CONTEXT)
         self.assertEqual(reply.delivery_context, CONTEXT)
+
+    async def test_manifest_encoding_budget_failure_is_definite_before_any_file_allocation(self):
+        tiny = replace(MANIFEST_POLICY, max_json_bytes=500)
+        with self.assertRaises(ManifestValidationError) as failure:
+            encode_manifest(self.source.captured.manifest, tiny)
+        self.assertEqual(failure.exception.code, "resource_budget")
+        service = BackupServiceImpl(self.session, self.source, tiny, ARCHIVE_POLICY)
+        with patch("pmkb.infrastructure.file_io.zip_writer.tempfile.mkstemp",
+                   wraps=tempfile.mkstemp) as allocate:
+            reply = await service.backup_collection(self.request())
+        allocate.assert_not_called()
+        self.assertFalse(self.target.exists())
+        self.assertEqual(list(self.target.parent.iterdir()), [])
+        self.assertEqual(self.source.calls, [CONTEXT])
+        self.assertEqual(self.source.released, [self.source.captured])
+        self.assertEqual(reply.status, ResultStatus.ERROR)
+        self.assertEqual(reply.error.code, "IO_FAILURE")
+        self.assertIsNone(reply.value)
+
+    async def test_exact_manifest_encoding_budget_publishes_and_verifies_real_archive(self):
+        encoded = encode_manifest(self.source.captured.manifest, MANIFEST_POLICY)
+        exact = replace(MANIFEST_POLICY, max_json_bytes=len(encoded))
+        service = BackupServiceImpl(self.session, self.source, exact, ARCHIVE_POLICY)
+        reply = await service.backup_collection(self.request())
+        self.assertEqual(reply.status, ResultStatus.OK)
+        self.assertEqual(reply.value.publication_state, FilePublicationState.PUBLISHED)
+        checked = inspect_package(self.target, exact, ARCHIVE_POLICY,
+                                  facts=self.source.captured.facts)
+        self.assertEqual(checked.manifest, self.source.captured.manifest)
+        self.assertEqual(self.source.released, [self.source.captured])
+
+    async def test_cancel_during_off_loop_manifest_preparation_does_not_publish(self):
+        import threading
+        owner = threading.get_ident()
+        cancel = Event()
+
+        def prepare(manifest, policy):
+            self.assertNotEqual(threading.get_ident(), owner)
+            encoded = encode_manifest(manifest, policy)
+            cancel.set()
+            return encoded
+
+        with patch("pmkb.application.backup_restore.backup_service.encode_manifest",
+                   side_effect=prepare), patch(
+                "pmkb.application.backup_restore.backup_service.publish_package") as publisher:
+            reply = await self.service().backup_collection(self.request(), cancel)
+        publisher.assert_not_called()
+        self.assertEqual(reply.status, ResultStatus.CANCELLED)
+        self.assertIsNone(reply.value)
+        self.assertFalse(self.target.exists())
+        self.assertEqual(self.source.released, [self.source.captured])
 
     async def test_empty_saved_collection_is_valid_not_an_empty_draft(self):
         captured = lease(b"")
@@ -380,6 +432,19 @@ class BackupServiceTests(unittest.IsolatedAsyncioTestCase):
             reply = await self.service().backup_collection(self.request())
         self.assertEqual(reply.status, ResultStatus.UNCONFIRMED)
         self.assertEqual(self.target.read_bytes(), b"formal with lost reply")
+
+    async def test_value_error_after_publisher_dispatch_remains_unknown_without_replay(self):
+        def lost(*args):
+            self.target.write_bytes(b"formal with lost value acknowledgement")
+            raise ValueError("publisher reply conversion failed after file publication")
+        with patch("pmkb.application.backup_restore.backup_service.publish_package",
+                   side_effect=lost) as publisher:
+            reply = await self.service().backup_collection(self.request())
+        self.assertEqual(reply.status, ResultStatus.UNCONFIRMED)
+        self.assertEqual(reply.value.publication_state, FilePublicationState.UNKNOWN)
+        self.assertEqual(publisher.call_count, 1)
+        self.assertEqual(self.target.read_bytes(), b"formal with lost value acknowledgement")
+        self.assertEqual(self.source.released, [self.source.captured])
 
     async def test_release_failure_is_warning_not_false_publication_failure(self):
         async def broken():
