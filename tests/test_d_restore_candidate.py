@@ -5,6 +5,7 @@ import hashlib
 import os
 from pathlib import Path
 import stat
+import struct
 from tempfile import TemporaryDirectory
 from threading import Event
 import unittest
@@ -52,6 +53,81 @@ class RestoreCandidateTests(unittest.TestCase):
 
     def prepare(self, cancel=None):
         return prepare_restore_candidate(self.source, self.parent, self.mp, self.ap, cancel)
+
+    def archive_with_hidden_member_bytes(self, compression, *, manifest_entry=False):
+        """Real member bytes exceed matching forged local/central prefix claims."""
+        prefix = encode_manifest(self.manifest, self.mp) if manifest_entry else b"A"
+        manifest = (self.manifest if manifest_entry else
+                    replace(self.manifest, snapshot_size_bytes=len(prefix),
+                            snapshot_sha256=hashlib.sha256(prefix).hexdigest()))
+        target_name = "manifest.json" if manifest_entry else "snapshot.sqlite"
+        with zipfile.ZipFile(self.source, "w", compression=compression) as archive:
+            archive.writestr("manifest.json", prefix + b" " * 100_000 if manifest_entry
+                             else encode_manifest(manifest, self.mp))
+            archive.writestr("snapshot.sqlite", self.payload if manifest_entry else prefix * 100_000)
+        with zipfile.ZipFile(self.source, "r") as archive:
+            target = archive.getinfo(target_name)
+            central_offset = archive.start_dir
+            for info in archive.infolist():
+                if info.orig_filename == target_name:
+                    break
+                central_offset += (46 + len(info.filename.encode("utf-8"))
+                                   + len(info.extra) + len(info.comment))
+        content = bytearray(self.source.read_bytes())
+        self.assertEqual(content[target.header_offset:target.header_offset + 4], b"PK\x03\x04")
+        self.assertEqual(content[central_offset:central_offset + 4], b"PK\x01\x02")
+        prefix_crc = zipfile.crc32(prefix)
+        struct.pack_into("<I", content, target.header_offset + 14, prefix_crc)
+        struct.pack_into("<I", content, target.header_offset + 22, len(prefix))
+        struct.pack_into("<I", content, central_offset + 16, prefix_crc)
+        struct.pack_into("<I", content, central_offset + 24, len(prefix))
+        # Leave compressed size and actual compressed/stored payload intact.
+        self.source.write_bytes(content)
+
+    def test_real_deflated_snapshot_prefix_claim_does_not_hide_extra_bytes(self):
+        self.archive_with_hidden_member_bytes(zipfile.ZIP_DEFLATED)
+        original = self.source.read_bytes()
+        with self.assertRaises(CandidateFailure):
+            self.prepare()
+        self.assertEqual(self.source.read_bytes(), original)
+        self.assertEqual(list(self.parent.iterdir()), [])
+
+    def test_real_stored_snapshot_prefix_claim_does_not_hide_extra_bytes(self):
+        self.archive_with_hidden_member_bytes(zipfile.ZIP_STORED)
+        original = self.source.read_bytes()
+        with self.assertRaises(CandidateFailure):
+            self.prepare()
+        self.assertEqual(self.source.read_bytes(), original)
+        self.assertEqual(list(self.parent.iterdir()), [])
+
+    def test_real_hidden_snapshot_bytes_cannot_bypass_actual_byte_budgets(self):
+        self.archive_with_hidden_member_bytes(zipfile.ZIP_DEFLATED)
+        original = self.source.read_bytes()
+        with zipfile.ZipFile(self.source, "r") as archive:
+            declared_total = sum(info.file_size for info in archive.infolist())
+        policies = (
+            (replace(self.ap, max_entry_bytes=1024), "ARCHIVE_SIZE_MISMATCH"),
+            (replace(self.ap, max_total_uncompressed_bytes=declared_total), "ARCHIVE_RESOURCE_BUDGET"),
+        )
+        for policy, expected_code in policies:
+            with self.subTest(policy=policy):
+                with self.assertRaises(CandidateFailure) as caught:
+                    prepare_restore_candidate(self.source, self.parent, self.mp, policy)
+                # The forged one-byte size may be rejected before the larger
+                # per-entry budget is reached; either way no prefix is trusted.
+                self.assertEqual(caught.exception.error.code, expected_code)
+                self.assertEqual(self.source.read_bytes(), original)
+                self.assertEqual(list(self.parent.iterdir()), [])
+
+    def test_real_hidden_manifest_bytes_cannot_bypass_capture_budget(self):
+        self.archive_with_hidden_member_bytes(zipfile.ZIP_DEFLATED, manifest_entry=True)
+        original = self.source.read_bytes()
+        policy = replace(self.ap, max_capture_bytes=len(encode_manifest(self.manifest, self.mp)))
+        with self.assertRaises(CandidateFailure) as caught:
+            prepare_restore_candidate(self.source, self.parent, self.mp, policy)
+        self.assertEqual(caught.exception.error.code, "ARCHIVE_CAPTURE_BUDGET")
+        self.assertEqual(self.source.read_bytes(), original)
+        self.assertEqual(list(self.parent.iterdir()), [])
 
     def test_one_stream_extracts_private_candidate_and_preserves_source(self):
         original = self.source.read_bytes()

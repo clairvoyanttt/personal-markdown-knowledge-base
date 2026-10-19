@@ -20,7 +20,7 @@ import zlib
 from pmkb.contracts.common import AppError
 from pmkb.infrastructure.file_io.zip_guard import (
     ArchiveEntryInspection, ArchiveInspection, ArchivePolicy, ArchiveValidationError,
-    _source_is_regular, _validate_metadata,
+    _source_is_regular, _validate_metadata, _verify_member_stream,
 )
 from .manifest import BackupManifest, ManifestPolicy, ManifestValidationError, decode_manifest
 
@@ -185,8 +185,10 @@ def prepare_restore_candidate(
     """Validate one read, stream snapshot privately, and retain an ownership handle.
 
     The exact two-entry D profile is explicit and still requires A/C agreement.
-    zip_guard's private metadata validator is reused inside this repository; it
-    is not a shared public parser or a second publication implementation.
+    zip_guard's private metadata and raw-stream validators are reused inside
+    this repository; they are not a shared public parser or a second publication
+    implementation. Raw verification precedes candidate writes, because
+    ZipExtFile alone can stop at a forged uncompressed-length prefix.
     """
     if not isinstance(source, Path) or not isinstance(work_parent, Path):
         raise ValueError("source and work_parent must be Path objects.")
@@ -239,6 +241,12 @@ def prepare_restore_candidate(
                         content = bytearray() if info.orig_filename == "manifest.json" else None
                         digest, size = hashlib.sha256(), 0
                         with archive.open(info, "r") as member:
+                            _verify_member_stream(
+                                archive, info, archive_policy,
+                                remaining_total=archive_policy.max_total_uncompressed_bytes - total,
+                                remaining_capture=capture_limit - captured if content is not None else None,
+                                check_cancel=lambda: _cancel(cancel),
+                            )
                             while True:
                                 _cancel(cancel)
                                 chunk = member.read(archive_policy.chunk_size)
