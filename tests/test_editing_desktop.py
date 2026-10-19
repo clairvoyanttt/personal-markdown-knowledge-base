@@ -9,6 +9,7 @@ from unittest.mock import patch
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 from PySide6.QtCore import QCoreApplication, QEvent, Qt, QUrl
 from PySide6.QtWidgets import QApplication, QMessageBox
+from PySide6.QtTest import QTest
 from pmkb.desktop.app import create_main_window
 from pmkb.contracts.collections import ActivationMode, LeaveChoice
 from pmkb.contracts.notes import ApplyDraftEditRequest, LoadNoteRequest
@@ -107,6 +108,8 @@ class EditorDesktopTests(unittest.TestCase):
     def test_failed_save_during_switch_keeps_original_drafts_and_collection(self):
         first = self.activate()
         self.window.new_draft()
+        self.window.body.setPlainText('retain this input when saving fails')
+        before = self.window._current()
         with patch.object(self.window, '_ask_leave', return_value=LeaveChoice.SAVE):
             directory = self.root / 'second'
             directory.mkdir()
@@ -114,6 +117,9 @@ class EditorDesktopTests(unittest.TestCase):
             self.pump(lambda: not self.window._switching)
         self.assertEqual(self.window.session.directory, str(first.resolve()))
         self.assertEqual(len(self.window.editing.views()), 1)
+        self.assertEqual(self.window._current(), before)
+        self.assertEqual(self.window.body.toPlainText(), before.snapshot.body)
+        self.assertTrue(self.window.body.isEnabled())
         self.assertIn('STATE_BLOCKED', self.window.statusBar().currentMessage())
 
     def test_rename_does_not_normalize_untouched_saved_markdown(self):
@@ -272,3 +278,125 @@ class EditorDesktopTests(unittest.TestCase):
             self.window.editing.context, None, AppError('IO_FAILURE', 'old preview failed', 'retry'))
         self.window._preview_ready(failed, (old.buffer_id, old.edit_version))
         self.assertEqual(self.window.statusBar().currentMessage(), 'current operation')
+
+    def test_queued_input_between_model_install_and_activated_has_consistent_view(self):
+        first = self.activate()
+        self.window.new_draft()
+        self.window.name.setText('old note')
+        self.window._apply_name()
+        self.window.body.setPlainText('old text selected for discard')
+        old_buffer = self.window._active_buffer
+        old_context = self.window.editing.context
+        target = self.root / 'handoff-target'
+        target.mkdir()
+        install = self.window.editing.install_collection
+        activated = self.window._activated
+        held, probes, errors = [], [], []
+
+        def probe():
+            # This is a queued Qt callback, not a worker-thread/widget shortcut.
+            # The model is installed, but the _activated result is held back.
+            state = {
+                'context': self.window.editing.context,
+                'buffers': self.window.editing.views(),
+                'active': self.window._active_buffer,
+                'location': self.window.location.text(),
+                'body_enabled': self.window.body.isEnabled(),
+                'name_enabled': self.window.name.isEnabled(),
+                'tag_enabled': self.window.tag_input.isEnabled(),
+                'body_before': self.window.body.toPlainText(),
+            }
+            # Real Qt key events must be rejected by disabled editors. Exercise
+            # queued shortcuts and input handlers too; none may read old_buffer.
+            for widget in (self.window.body, self.window.name, self.window.tag_input):
+                QTest.keyClicks(widget, 'queued input')
+            for handler in (self.window.save_shortcut.activated.emit, self.window._apply_text,
+                            self.window._apply_name, self.window.add_tag,
+                            self.window.remove_tag, self.window._request_preview):
+                try:
+                    handler()
+                except Exception as error:
+                    errors.append(error)
+            state['body_after'] = self.window.body.toPlainText()
+            state['name_after'] = self.window.name.text()
+            state['tag_after'] = self.window.tag_input.text()
+            probes.append(state)
+
+        def install_then_queue(*args, **kwargs):
+            context = install(*args, **kwargs)
+            if context is not None:
+                self.window.dispatcher.post(probe)
+            return context
+
+        try:
+            with patch.object(self.window, '_ask_leave', return_value=LeaveChoice.DISCARD), \
+                 patch.object(self.window, '_activated', side_effect=held.append), \
+                 patch.object(self.window.editing, 'install_collection', side_effect=install_then_queue), \
+                 patch('sys.excepthook', side_effect=lambda kind, error, tb: errors.append(error)):
+                self.window.open_collection(ActivationMode.CREATE, target)
+                self.pump(lambda: bool(held) and bool(probes))
+            state = probes[0]
+            self.assertNotEqual(state['context'], old_context)
+            self.assertEqual(state['buffers'], ())
+            self.assertEqual(errors, [])
+            self.assertIsNone(state['active'], f'Old active buffer {old_buffer} survived installation')
+            self.assertEqual(state['location'], str(target.resolve()))
+            self.assertFalse(state['body_enabled'])
+            self.assertFalse(state['name_enabled'])
+            self.assertFalse(state['tag_enabled'])
+            self.assertEqual(state['body_before'], '')
+            self.assertEqual(state['body_after'], '')
+            self.assertEqual(state['name_after'], '')
+            self.assertEqual(state['tag_after'], '')
+        finally:
+            for result in held:
+                activated(result)
+        # Once the result completes, new input is accepted into a new draft in
+        # the target collection and survives subsequent state-only refreshes.
+        self.window.new_draft()
+        QTest.keyClicks(self.window.body, 'new collection text')
+        accepted = self.window._current().snapshot
+        self.window._refresh()
+        self.assertEqual(self.window._current().snapshot.body, 'new collection text')
+        self.assertEqual(self.window.body.toPlainText(), accepted.body)
+        self.assertTrue((first / 'knowledge.sqlite').is_file())
+
+    def test_cancel_switch_keeps_original_model_and_editor(self):
+        first = self.activate()
+        self.window.new_draft()
+        self.window.body.setPlainText('keep on cancelled switch')
+        before, context = self.window._current(), self.window.editing.context
+        target = self.root / 'cancelled-target'
+        target.mkdir()
+        with patch.object(self.window, '_ask_leave', return_value=LeaveChoice.CANCEL):
+            self.window.open_collection(ActivationMode.CREATE, target)
+            self.pump(lambda: not self.window._switching)
+        self.assertEqual(self.window.editing.context, context)
+        self.assertEqual(self.window._current(), before)
+        self.assertEqual(self.window.body.toPlainText(), before.snapshot.body)
+        self.assertEqual(self.window.location.text(), str(first.resolve()))
+        self.assertTrue(self.window.body.isEnabled())
+
+    def test_last_qt_activation_version_rejection_keeps_new_input_and_published_target(self):
+        first = self.activate()
+        self.window.new_draft()
+        self.window.body.setPlainText('original ')
+        context, buffer_id = self.window.editing.context, self.window._active_buffer
+        target = self.root / 'rejected-target'
+        target.mkdir()
+        install = self.window.editing.install_collection
+        def edit_before_final_check(*args, **kwargs):
+            self.window.body.moveCursor(self.window.body.textCursor().MoveOperation.End)
+            QTest.keyClicks(self.window.body, 'arrived before final check')
+            return install(*args, **kwargs)
+        with patch.object(self.window, '_ask_leave', return_value=LeaveChoice.DISCARD), \
+             patch.object(self.window.editing, 'install_collection', side_effect=edit_before_final_check):
+            self.window.open_collection(ActivationMode.CREATE, target)
+            self.pump(lambda: not self.window._switching)
+        self.assertEqual(self.window.editing.context, context)
+        self.assertEqual(self.window._active_buffer, buffer_id)
+        self.assertEqual(self.window._current().snapshot.body, 'original arrived before final check')
+        self.assertEqual(self.window.body.toPlainText(), self.window._current().snapshot.body)
+        self.assertEqual(self.window.location.text(), str(first.resolve()))
+        self.assertTrue(self.window.body.isEnabled())
+        self.assertTrue((target / 'knowledge.sqlite').is_file())

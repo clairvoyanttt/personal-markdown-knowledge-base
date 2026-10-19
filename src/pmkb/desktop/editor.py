@@ -41,7 +41,8 @@ class EditorWindow(StartupWindow):
             raise ValueError('The application must supply an absolute configuration path.')
         super().__init__()
         self.editing = EditingService(ActiveContextGate(), storage)
-        self.session = EditorSession(self.editing, self.dispatcher)
+        self.session = EditorSession(self.editing, self.dispatcher,
+                                     install_view=self._install_collection_view)
         self.services = ApplicationServices.compose(self.session, config_file, self.runtime)
         self.previews = PreviewService(self.editing, preview_renderer)
         self._preview_timer = QTimer(self)
@@ -157,6 +158,20 @@ class EditorWindow(StartupWindow):
     def _remember_tag_input(self, text):
         if self._active_buffer:
             self._draft_text_inputs[self._active_buffer] = text
+
+    def _install_collection_view(self):
+        """Final Qt activation boundary, not a later outcome presentation.
+
+        The old buffers have just been discarded by a successful model install.
+        Clear their selection/input state and install the new location and
+        disabled empty editors before returning to Qt's event queue. Rejected
+        or cancelled activation never calls this method.
+        """
+        self._active_buffer = None
+        self._draft_text_inputs.clear()
+        self._preview_timer.stop()
+        self._preview_key = None
+        self._refresh(refresh_text=True)
 
     def _current(self):
         return self.editing.view(self._active_buffer) if self._active_buffer else None
@@ -316,8 +331,10 @@ class EditorWindow(StartupWindow):
             self.statusBar().showMessage('操作完成。' if result.status == ResultStatus.OK else '操作已取消。')
 
     def save_current(self):
+        if self.editing.busy or self._switching or self._exit_waiting or self._closing:
+            return  # Includes shortcuts queued during the activation handoff.
         view = self._current()
-        if view is None or self.editing.busy or self._switching or self._exit_waiting:
+        if view is None:
             return
         request = SaveNoteRequest(self.editing.context, secrets.token_hex(16), view.snapshot)
         self._submit(lambda cancel: self.editing.save_note(request, cancel), self._saved)
@@ -411,7 +428,9 @@ class EditorWindow(StartupWindow):
     def _activated(self, result):
         self._switching = False
         self._show_result(result)
-        self._refresh(refresh_text=True)
+        # Model + text/selection/location were already installed together on Qt.
+        # A late outcome only changes operation status; it must not replace text.
+        self._refresh()
 
     def _resume_exit(self):
         self._stop_exit_poll()

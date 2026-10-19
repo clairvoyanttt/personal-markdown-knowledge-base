@@ -1,5 +1,6 @@
 """B's real in-memory editor session for A's collection coordinator."""
 import secrets
+from collections.abc import Callable
 
 from pmkb.application.editing.service import EditingService, EditingFailure
 from pmkb.contracts.common import ResultStatus
@@ -7,8 +8,12 @@ from pmkb.contracts.notes import SaveNoteRequest
 
 
 class EditorSession:
-    def __init__(self, editing: EditingService, dispatcher):
+    def __init__(self, editing: EditingService, dispatcher,
+                 *, install_view: Callable[[], None] | None = None):
+        if install_view is not None and not callable(install_view):
+            raise ValueError('The editor view installer must be a synchronous callable.')
         self.editing, self.dispatcher = editing, dispatcher
+        self._install_view = install_view
         self.directory: str | None = None
 
     @property
@@ -40,5 +45,10 @@ class EditorSession:
                                                       discard_ids, cancel_signals)
             if context is not None:
                 self.directory = target.directory
+                # The real window installs its view synchronously in this same
+                # final Qt callback, before any queued key/shortcut can run or
+                # the coordinator receives the installed context. No post/await.
+                if self._install_view is not None:
+                    self._install_view()
             return context
         return await self.dispatcher.invoke(install)
