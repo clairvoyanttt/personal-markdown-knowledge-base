@@ -185,4 +185,90 @@ class EditorDesktopTests(unittest.TestCase):
             self.pump(lambda: not self.window._exit_waiting)
         self.assertTrue(self.window.isVisible())
         self.assertFalse(self.window.runtime.is_stopped)
-        self.assertIn('REVISION_CONFLICT', self.window.statusBar().currentMessage())
+        self.assertIn('STATE_BLOCKED', self.window.statusBar().currentMessage())
+
+    def test_relative_config_is_rejected_before_background_runtime_starts(self):
+        with patch('pmkb.desktop.app.AsyncServiceRuntime') as runtime:
+            with self.assertRaises(ValueError):
+                create_main_window(Path('relative-config.json'))
+            runtime.assert_not_called()
+
+    def test_waiting_for_worker_can_cancel_exit_without_closing_later(self):
+        import asyncio
+        from threading import Event
+        started, release = Event(), Event()
+        async def work(cancel):
+            started.set()
+            await asyncio.to_thread(release.wait, 3)
+            return 'settled'
+        handle = self.window.runtime.submit(work)
+        self.assertTrue(started.wait(2))
+        try:
+            self.window.close()
+            self.assertTrue(hasattr(self.window, 'cancel_exit_button'))
+            self.assertTrue(self.window.cancel_exit_button.isVisible())
+            self.window.cancel_exit_button.click()
+            self.assertFalse(self.window._exit_waiting)
+            self.assertTrue(self.window.centralWidget().isEnabled())
+        finally:
+            release.set()
+            self.pump(handle.outcome.done)
+        for _ in range(20):
+            self.app.processEvents()
+            time.sleep(.001)
+        self.assertTrue(self.window.isVisible())
+        self.assertFalse(self.window.runtime.is_stopped)
+
+    def test_cancelled_exit_drops_late_close_permission(self):
+        from pmkb.contracts.common import OperationResult
+        from pmkb.contracts.commit_resolution import CloseUnconfirmedReply
+        self.window._exit_waiting = False
+        result = OperationResult(ResultStatus.OK, self.window.editing.context,
+            self.window.editing.context, CloseUnconfirmedReply(True, True, ()), None)
+        with patch.object(self.window.editing, 'exit_permit_current', return_value=True):
+            self.window._exit_permission(result)
+        self.assertFalse(self.window._closing)
+
+    def test_close_prompt_treats_note_name_as_plain_text(self):
+        self.activate()
+        self.window.new_draft()
+        s = self.window._current().snapshot
+        self.window.editing.edit(ApplyDraftEditRequest(self.window.editing.context,
+            s.buffer_id, s.edit_version, '<b>literal name</b>', '', ()))
+        formats = []
+        def cancel(dialog):
+            formats.append(dialog.textFormat())
+            return QMessageBox.StandardButton.Cancel
+        with patch.object(QMessageBox, 'exec', cancel), \
+             patch.object(QMessageBox, 'question', return_value=QMessageBox.StandardButton.Cancel):
+            self.window._ask_leave(self.window._current())
+        self.assertEqual(formats, [Qt.TextFormat.PlainText])
+
+    def test_check_not_committed_is_explained_as_unsaved_in_ui(self):
+        from pmkb.contracts.common import OperationResult
+        from pmkb.contracts.commit_resolution import CommitCheckReply, CommitCheckState
+        reply = CommitCheckReply('a' * 32, 'b' * 32, 0, CommitCheckState.NOT_COMMITTED, None, None)
+        result = OperationResult(ResultStatus.OK, self.window.editing.context,
+            self.window.editing.context, reply, None)
+        self.window._saved(result)
+        self.assertIn('未提交', self.window.statusBar().currentMessage())
+
+    def test_cancelled_worker_result_is_consumed_without_unhandled_ui_callback(self):
+        import asyncio
+        async def cancelled(cancel):
+            raise asyncio.CancelledError()
+        self.window._submit(cancelled, lambda result: self.fail('No successful result exists'))
+        self.pump(lambda: self.window.runtime.pending_count == 0 and self.window.dispatcher.pending_count == 0)
+        self.assertIn('操作异常', self.window.statusBar().currentMessage())
+
+    def test_stale_preview_failure_does_not_replace_current_status(self):
+        from pmkb.contracts.common import OperationResult, AppError
+        self.activate()
+        self.window.new_draft()
+        old = self.window._current().snapshot
+        self.window.body.setPlainText('new input')
+        self.window.statusBar().showMessage('current operation')
+        failed = OperationResult(ResultStatus.ERROR, self.window.editing.context,
+            self.window.editing.context, None, AppError('IO_FAILURE', 'old preview failed', 'retry'))
+        self.window._preview_ready(failed, (old.buffer_id, old.edit_version))
+        self.assertEqual(self.window.statusBar().currentMessage(), 'current operation')

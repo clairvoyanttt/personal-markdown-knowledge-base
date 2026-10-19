@@ -227,8 +227,13 @@ class EditingService:
                 if (not isinstance(note, SavedNote) or note.note_id != request.note_id
                         or not version(note.revision, 1) or not isinstance(note.body, str)):
                     raise EditingFailure('IO_FAILURE', '存储服务返回了无效的保存版。')
-                single_line(note.name, 100, 'INVALID_NAME')
+                if single_line(note.name, 100, 'INVALID_NAME') != note.name:
+                    raise EditingFailure('IO_FAILURE', '保存版名称不符合规范，未改写原数据。')
                 tags = accepted_tags(note.tags)
+                if type(note.tags) is not tuple or tags != note.tags:
+                    raise EditingFailure('IO_FAILURE', '保存版标签不符合规范，未改写原数据。')
+                if any(0xd800 <= ord(c) <= 0xdfff for c in note.body):
+                    raise EditingFailure('IO_FAILURE', '保存版正文包含无效 Unicode，未加载为已保存草稿。')
                 snapshot = DraftSnapshot(secrets.token_hex(16), note.note_id, note.revision,
                                          0, note.name, note.body, tags)
                 self._buffers[snapshot.buffer_id] = _Buffer(snapshot, 0)
@@ -371,6 +376,9 @@ class EditingService:
                 if state != CommitCheckState.UNRESOLVED:
                     self._pending = None
             resolved = state != CommitCheckState.UNRESOLVED
+            if not resolved and signal.is_set():
+                # Cancelling a read/check does not resolve or roll back SAVE.
+                return self._result(context, ResultStatus.CANCELLED)
             reply = CommitCheckReply(attempt.command_id, attempt.note_id, attempt.snapshot.edit_version,
                 state, evidence.saved_revision if resolved else None,
                 evidence.collection_revision if resolved else None)
@@ -403,7 +411,7 @@ class EditingService:
                 if signal.is_set():
                     return self._result(context, ResultStatus.CANCELLED)
                 if not self._exit_versions_current(request):
-                    raise EditingFailure('REVISION_CONFLICT', '须明确确认未知提交风险及全部最新草稿版本。',
+                    raise EditingFailure('STATE_BLOCKED', '须明确确认未知提交风险及全部最新草稿版本。',
                                          '重新确认；退出后不保证恢复内存草稿。')
                 self._exit_authorization = replace(request, confirmed_draft_edit_versions=
                     MappingProxyType(dict(request.confirmed_draft_edit_versions)))

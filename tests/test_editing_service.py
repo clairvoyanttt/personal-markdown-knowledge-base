@@ -303,6 +303,38 @@ class EditingTests(unittest.IsolatedAsyncioTestCase):
         versions[v.snapshot.buffer_id] = newer.snapshot.edit_version
         self.assertFalse(self.service.exit_permit_current(request))
 
+    async def test_cancel_check_without_reliable_evidence_keeps_pending_and_returns_cancelled(self):
+        view, pending = await self.pending()
+        signal = Event()
+        async def unresolved(attempt, cancel):
+            cancel.set()
+            return self.storage.evidence(attempt, SaveEvidenceState.UNRESOLVED)
+        self.storage.check_save = unresolved
+        result = await self.service.check_commit(CheckCommitRequest(
+            self.ctx, pending.pending_save_id, pending.command_id), signal)
+        self.assertEqual(result.status, ResultStatus.CANCELLED)
+        self.assertIsNone(result.value)
+        self.assertTrue(self.service.has_unconfirmed_save)
+        self.assertTrue(self.service.view(view.snapshot.buffer_id).is_dirty)
+
+    async def test_unknown_exit_without_both_acknowledgements_is_state_blocked(self):
+        view, pending = await self.pending()
+        request = CloseUnconfirmedRequest(self.ctx, pending.pending_save_id,
+            pending.command_id, False, True, {view.snapshot.buffer_id: 0})
+        result = await self.service.close_unconfirmed_session(request)
+        self.assertEqual(result.error.code, 'STATE_BLOCKED')
+
+    async def test_loading_noncanonical_or_invalid_saved_text_never_rewrites_it_as_clean(self):
+        for note in [SavedNote(N, 1, 'saved', 'body', (' AI ',)),
+                     SavedNote(N, 1, ' saved ', 'body', ()),
+                     SavedNote(N, 1, 'saved', '\ud800', ())]:
+            async def load(context, note_id, cancel, value=note):
+                return value
+            self.storage.load_note = load
+            result = await self.service.load_note(LoadNoteRequest(self.ctx, N))
+            self.assertEqual(result.status, ResultStatus.ERROR)
+            self.assertFalse(self.service.views())
+
 
 if __name__ == '__main__':
     unittest.main()

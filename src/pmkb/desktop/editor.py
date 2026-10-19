@@ -20,7 +20,9 @@ from pmkb.contracts.collections import (
 )
 from pmkb.contracts.common import ResultStatus
 from pmkb.contracts.notes import ApplyDraftEditRequest, CreateDraftRequest, SaveNoteRequest
-from pmkb.contracts.commit_resolution import CheckCommitRequest, CloseUnconfirmedRequest
+from pmkb.contracts.commit_resolution import (
+    CheckCommitRequest, CloseUnconfirmedRequest, CommitCheckReply, CommitCheckState,
+)
 from pmkb.desktop.app import StartupWindow
 from pmkb.desktop.composition import ApplicationServices
 from pmkb.desktop.editor_session import EditorSession
@@ -34,6 +36,9 @@ class LocalPreview(QTextBrowser):
 
 class EditorWindow(StartupWindow):
     def __init__(self, config_file: Path, storage=None, preview_renderer=None):
+        config_file = Path(config_file)
+        if not config_file.is_absolute():
+            raise ValueError('The application must supply an absolute configuration path.')
         super().__init__()
         self.editing = EditingService(ActiveContextGate(), storage)
         self.session = EditorSession(self.editing, self.dispatcher)
@@ -47,11 +52,16 @@ class EditorWindow(StartupWindow):
         self._active_buffer: str | None = None
         self._switching = False
         self._exit_waiting = False
+        self._exit_polling = False
         self._unknown_exit = None
         self._draft_text_inputs: dict[str, str] = {}
         self.setWindowTitle('个人 Markdown 知识库 · B 编辑开发版')
         self.resize(1180, 760)
         self._build_ui()
+        self.cancel_exit_button = QPushButton('取消退出', self)
+        self.cancel_exit_button.clicked.connect(self._cancel_exit)
+        self.statusBar().addPermanentWidget(self.cancel_exit_button)
+        self.cancel_exit_button.hide()
         self._refresh()
 
     def _build_ui(self):
@@ -271,14 +281,16 @@ class EditorWindow(StartupWindow):
         if view and item:
             self._apply_tags(tuple(t for t in view.snapshot.tags if t != item.text()))
 
-    def _submit(self, factory, callback):
+    def _submit(self, factory, callback, on_error=None):
         """Observe exceptions and deliver only to the active collection on Qt."""
         handle = self.runtime.submit(factory)
         def done(future):
             try:
                 result = future.result()  # Already done; no blocking on Qt.
-            except Exception:
-                self.dispatcher.post(lambda: self._operation_failed())
+            except BaseException:
+                # Runtime exposes CancelledError too; consume it without claiming
+                # rollback or letting a Future callback strand the UI state.
+                self.dispatcher.post(on_error or self._operation_failed)
             else:
                 self.dispatcher.deliver(result, lambda: self.editing.context, callback)
         handle.outcome.add_done_callback(done)
@@ -286,10 +298,16 @@ class EditorWindow(StartupWindow):
         return handle
 
     def _operation_failed(self):
-        self._switching = False
-        self._resume_exit()
         self.statusBar().showMessage('操作异常；请核查实际状态，未声称保存或切换成功。')
         self._refresh()
+
+    def _transition_failed(self):
+        self._switching = False
+        self._operation_failed()
+
+    def _exit_failed(self):
+        self._resume_exit()
+        self._operation_failed()
 
     def _show_result(self, result, quiet=False):
         if result.error:
@@ -306,6 +324,11 @@ class EditorWindow(StartupWindow):
 
     def _saved(self, result):
         self._show_result(result)
+        if result.status == ResultStatus.OK and isinstance(result.value, CommitCheckReply):
+            if result.value.state == CommitCheckState.NOT_COMMITTED:
+                self.statusBar().showMessage('核实完成：原保存已确认未提交；草稿保留，可手动重新保存。')
+            elif result.value.state == CommitCheckState.COMMITTED:
+                self.statusBar().showMessage('核实完成：原保存的捕获版本已提交；后续编辑仍须另行保存。')
         self._refresh()
 
     def _request_preview(self):
@@ -314,10 +337,13 @@ class EditorWindow(StartupWindow):
             return
         s, context = view.snapshot, self.editing.context
         self._submit(lambda cancel: self.previews.preview(context, s.buffer_id, s.edit_version, cancel),
-                     self._preview_ready)
+                     lambda result: self._preview_ready(result, (s.buffer_id, s.edit_version)))
 
-    def _preview_ready(self, result):
+    def _preview_ready(self, result, expected=None):
         view = self._current()
+        if expected is not None and (view is None or expected != (
+                view.snapshot.buffer_id, view.snapshot.edit_version)):
+            return
         if result.status != ResultStatus.OK:
             if result.status != ResultStatus.CANCELLED:
                 self._show_result(result)
@@ -346,13 +372,20 @@ class EditorWindow(StartupWindow):
             return
         self._switching = True
         request = PrepareActivationRequest(self.editing.context, mode, str(Path(directory).resolve()))
-        self._submit(lambda cancel: self.services.collections.prepare_activation(request, cancel), self._prepared)
+        self._submit(lambda cancel: self.services.collections.prepare_activation(request, cancel),
+                     self._prepared, self._transition_failed)
 
     def _ask_leave(self, view):
-        answer = QMessageBox.question(self, '未保存草稿',
-            f'草稿“{view.snapshot.name or "未命名"}”有未保存修改。保存、放弃还是取消？',
-            QMessageBox.StandardButton.Save | QMessageBox.StandardButton.Discard | QMessageBox.StandardButton.Cancel,
-            QMessageBox.StandardButton.Cancel)
+        dialog = QMessageBox(self)
+        dialog.setWindowTitle('未保存草稿')
+        dialog.setIcon(QMessageBox.Icon.Question)
+        dialog.setTextFormat(Qt.TextFormat.PlainText)
+        dialog.setText(f'草稿“{view.snapshot.name or "未命名"}”有未保存修改。保存、放弃还是取消？')
+        dialog.setStandardButtons(QMessageBox.StandardButton.Save | QMessageBox.StandardButton.Discard
+                                  | QMessageBox.StandardButton.Cancel)
+        dialog.setDefaultButton(QMessageBox.StandardButton.Cancel)
+        answer = dialog.exec()
+        dialog.deleteLater()
         return {QMessageBox.StandardButton.Save: LeaveChoice.SAVE,
                 QMessageBox.StandardButton.Discard: LeaveChoice.DISCARD}.get(answer, LeaveChoice.CANCEL)
 
@@ -368,10 +401,12 @@ class EditorWindow(StartupWindow):
             for v in self.editing.views() if v.is_dirty)
         if any(d.choice == LeaveChoice.CANCEL for d in decisions) or self._exit_waiting:
             request = CancelActivationRequest(result.delivery_context, ticket.ticket_id)
-            self._submit(lambda cancel: self.services.collections.cancel_activation(request, cancel), self._activated)
+            self._submit(lambda cancel: self.services.collections.cancel_activation(request, cancel),
+                         self._activated, self._transition_failed)
         else:
             request = CompleteActivationRequest(result.delivery_context, ticket.ticket_id, decisions)
-            self._submit(lambda cancel: self.services.collections.complete_activation(request, cancel), self._activated)
+            self._submit(lambda cancel: self.services.collections.complete_activation(request, cancel),
+                         self._activated, self._transition_failed)
 
     def _activated(self, result):
         self._switching = False
@@ -379,11 +414,26 @@ class EditorWindow(StartupWindow):
         self._refresh(refresh_text=True)
 
     def _resume_exit(self):
+        self._stop_exit_poll()
         self._exit_waiting = False
         self._unknown_exit = None
+        self.cancel_exit_button.hide()
+        self._preview_key = None
         if self.centralWidget():
             self.centralWidget().setEnabled(True)
         self._refresh()
+
+    def _cancel_exit(self):
+        if self._exit_waiting and not self._closing:
+            self._resume_exit()
+            self.statusBar().showMessage('已取消退出；后台操作仍按真实结果收尾，草稿保留。')
+
+    def _stop_exit_poll(self):
+        if self._exit_polling:
+            self._poll.stop()
+            self._poll.timeout.disconnect(self._settle_exit)
+            self._poll.timeout.connect(self._check_shutdown)
+            self._exit_polling = False
 
     def closeEvent(self, event):
         if self._closed_runtime or self._closing:
@@ -393,19 +443,23 @@ class EditorWindow(StartupWindow):
         if self._exit_waiting:
             return
         self._exit_waiting = True
+        self.cancel_exit_button.show()
+        self.statusBar().showMessage('正在等待后台操作及结果收尾；可取消退出，取消不代表已回滚。')
         self._preview_timer.stop()
         self.centralWidget().setEnabled(False)
         self.runtime.request_cancel_all()
         self._poll.timeout.disconnect(self._check_shutdown)
         self._poll.timeout.connect(self._settle_exit)
+        self._exit_polling = True
         self._poll.start()
 
     def _settle_exit(self):
+        if not self._exit_waiting:
+            self._stop_exit_poll()
+            return
         if self.runtime.pending_count or self.dispatcher.pending_count or self.editing.busy or self._switching:
             return
-        self._poll.stop()
-        self._poll.timeout.disconnect(self._settle_exit)
-        self._poll.timeout.connect(self._check_shutdown)
+        self._stop_exit_poll()
         pending = self.editing.pending
         if pending is not None:
             confirmed_versions = {v.snapshot.buffer_id: v.snapshot.edit_version for v in self.editing.views()}
@@ -415,26 +469,29 @@ class EditorWindow(StartupWindow):
                 '建议取消退出并核实原命令。是否仍明确确认未知提交风险并放弃全部会话草稿？',
                 QMessageBox.StandardButton.Discard | QMessageBox.StandardButton.Cancel,
                 QMessageBox.StandardButton.Cancel)
-            if answer != QMessageBox.StandardButton.Discard:
+            if not self._exit_waiting or answer != QMessageBox.StandardButton.Discard:
                 self._resume_exit()
                 return
             request = CloseUnconfirmedRequest(self.editing.context, pending.pending_save_id,
                 pending.command_id, True, True,
                 confirmed_versions)
             self._unknown_exit = request
-            self._submit(lambda cancel: self.editing.close_unconfirmed_session(request, cancel), self._exit_permission)
+            self._submit(lambda cancel: self.editing.close_unconfirmed_session(request, cancel),
+                         self._exit_permission, self._exit_failed)
             return
         versions = self.editing.buffers()
         for view in self.editing.views():
             if not view.is_dirty:
                 continue
             choice = self._ask_leave(view)
+            if not self._exit_waiting:
+                return
             if choice == LeaveChoice.CANCEL:
                 self._resume_exit()
                 return
             if choice == LeaveChoice.SAVE:
                 self._submit(lambda cancel, v=view: self.session.save_buffer(v.snapshot.buffer_id,
-                    v.snapshot.edit_version, cancel), self._exit_saved)
+                    v.snapshot.edit_version, cancel), self._exit_saved, self._exit_failed)
                 return
         # Modal dialogs run a nested event loop: recheck all versions afterwards.
         if versions != self.editing.buffers() or self.editing.pending is not None:
@@ -444,12 +501,15 @@ class EditorWindow(StartupWindow):
         self._begin_final_close()
 
     def _exit_saved(self, result):
+        continue_exit = self._exit_waiting
         self._resume_exit()
         self._show_result(result)
-        if result.status == ResultStatus.OK:
+        if continue_exit and result.status == ResultStatus.OK:
             self.close()  # Recheck all buffers; later input is never silently discarded.
 
     def _exit_permission(self, result):
+        if not self._exit_waiting:
+            return  # A late permission cannot revive a cancelled exit intent.
         if (result.status == ResultStatus.OK and result.value.ready_to_close
                 and self.editing.exit_permit_current(self._unknown_exit)):
             self._begin_final_close()
@@ -459,6 +519,7 @@ class EditorWindow(StartupWindow):
 
     def _begin_final_close(self):
         self._closing = True
+        self.cancel_exit_button.hide()
         self.statusBar().showMessage('退出许可已确认，正在等待后台资源收尾。')
         self.runtime.begin_shutdown()
         self._poll.start()
