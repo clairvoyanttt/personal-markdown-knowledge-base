@@ -129,6 +129,88 @@ class RestoreServiceTests(unittest.IsolatedAsyncioTestCase):
     def check_original(self):
         self.assertEqual(self.source.read_bytes(), self.original)
 
+    async def check_invalid_input(self, request, cancel=None, expected_context=CallContext(None, 0)):
+        original_state = self.session.state
+        with patch.object(self.session, "inspect") as inspect, \
+                patch("pmkb.application.backup_restore.restore_service._preflight") as preflight, \
+                patch("pmkb.application.backup_restore.restore_service.prepare_restore_candidate") as prepare:
+            reply = await asyncio.wait_for(self.service.restore_backup(request, cancel), 1)
+        self.assertEqual(reply.status, ResultStatus.ERROR)
+        self.assertEqual(reply.error.code, "INVALID_ARGUMENT")
+        self.assertIsNone(reply.value)
+        self.assertEqual(reply.request_context, expected_context)
+        self.assertEqual(reply.delivery_context, expected_context)
+        self.assertEqual(reply.warnings, ())
+        inspect.assert_not_called()
+        preflight.assert_not_called()
+        prepare.assert_not_called()
+        self.assertIs(self.session.state, original_state)
+        self.assertEqual(self.storage.validations, 0)
+        self.assertEqual(self.storage.initializations, 0)
+        self.assertEqual(self.storage.releases, 0)
+        self.assertEqual(self.targets.prepares, 0)
+        self.assertEqual(self.targets.publications, 0)
+        self.assertEqual(self.targets.releases, [])
+        self.assertEqual(list(self.work.iterdir()), [])
+        self.assertEqual(list(self.destination.iterdir()), [])
+        self.check_original()
+
+    async def test_malformed_requests_return_invalid_argument_without_effects(self):
+        for request in (None, object(), {}, {"context": CONTEXT,
+                        "source_file": str(self.source), "destination_directory": str(self.destination)}):
+            with self.subTest(request=request):
+                await self.check_invalid_input(request)
+
+    async def test_invalid_request_contexts_use_neutral_result_without_session_lookup(self):
+        for context in (None, object(), {"collection_id": SOURCE, "context_generation": 2},
+                        CallContext(SOURCE, True), CallContext(SOURCE, -1),
+                        CallContext(SOURCE, 2 ** 63), CallContext("invalid", 2),
+                        CallContext(None, "2")):
+            with self.subTest(context=context):
+                await self.check_invalid_input(replace(self.request, context=context))
+
+    async def test_invalid_cancel_returns_error_and_preserves_valid_request_context(self):
+        for context in (CONTEXT, CallContext(None, 0)):
+            for cancel in (False, True, 0, 1, "", "cancel", object(), asyncio.Event()):
+                with self.subTest(context=context, cancel=cancel):
+                    await self.check_invalid_input(replace(self.request, context=context), cancel, context)
+
+    async def test_invalid_inputs_are_rejected_before_acquiring_or_releasing_busy_lock(self):
+        await self.service._lock.acquire()
+        try:
+            for request, cancel, context in (
+                (None, None, CallContext(None, 0)),
+                (replace(self.request, context=CallContext(SOURCE, True)), None, CallContext(None, 0)),
+                (self.request, False, CONTEXT),
+            ):
+                with self.subTest(request=request, cancel=cancel):
+                    pending = asyncio.create_task(self.check_invalid_input(request, cancel, context))
+                    done, _ = await asyncio.wait({pending}, timeout=0.5)
+                    if not done:
+                        self.service._lock.release()
+                        await asyncio.gather(pending, return_exceptions=True)
+                        self.fail("Invalid restore input waited for the busy operation lock.")
+                    await pending
+                    self.assertTrue(self.service._lock.locked())
+        finally:
+            if self.service._lock.locked():
+                self.service._lock.release()
+
+    async def test_invalid_input_does_not_prevent_subsequent_valid_restore(self):
+        await self.check_invalid_input(None)
+        await self.check_invalid_input(self.request, False, CONTEXT)
+        self.assertFalse(self.service._lock.locked())
+        reply = await self.service.restore_backup(self.request)
+        self.assertEqual(reply.status, ResultStatus.OK)
+        self.assertEqual(reply.delivery_context, CONTEXT)
+        self.assertEqual(self.storage.validations, 1)
+        self.assertEqual(self.storage.initializations, 1)
+        self.assertEqual(self.targets.prepares, 1)
+        self.assertEqual(self.targets.publications, 1)
+        self.assertFalse(self.service._lock.locked())
+        self.assertEqual(list(self.work.iterdir()), [])
+        self.check_original()
+
     async def test_complete_d_flow_reports_only_substitute_publication_and_never_activates(self):
         reply = await self.service.restore_backup(self.request)
         self.assertEqual(reply.status, ResultStatus.OK)
