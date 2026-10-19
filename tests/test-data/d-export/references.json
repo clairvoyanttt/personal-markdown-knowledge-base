@@ -1,0 +1,30 @@
+[
+  {
+    "start_utf16": 13,
+    "length_utf16": 74,
+    "marker_text": "[[note:0123456789abcdef0123456789abcdef:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa]]",
+    "kind": "VALID",
+    "target_name": "数据结构复习"
+  },
+  {
+    "start_utf16": 91,
+    "length_utf16": 74,
+    "marker_text": "[[note:0123456789abcdef0123456789abcdef:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb]]",
+    "kind": "DELETED",
+    "target_name": "旧标题"
+  },
+  {
+    "start_utf16": 169,
+    "length_utf16": 74,
+    "marker_text": "[[note:0123456789abcdef0123456789abcdef:cccccccccccccccccccccccccccccccc]]",
+    "kind": "MISSING",
+    "target_name": null
+  },
+  {
+    "start_utf16": 247,
+    "length_utf16": 74,
+    "marker_text": "[[note:0123456789abcdef0123456789abcdef:dddddddddddddddddddddddddddddddd]]",
+    "kind": "FOREIGN_COLLECTION",
+    "target_name": null
+  }
+]
