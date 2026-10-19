@@ -171,6 +171,9 @@ class EditorWindow(StartupWindow):
         self._draft_text_inputs.clear()
         self._preview_timer.stop()
         self._preview_key = None
+        # None is also the empty collection's key, so _refresh cannot detect
+        # this transition. Clear completed render output at the same boundary.
+        self.preview.setPlainText('请选择草稿。' if self.previews.renderer else '等待 C 的统一解析接口。')
         self._refresh(refresh_text=True)
 
     def _current(self):

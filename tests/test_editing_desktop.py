@@ -55,6 +55,19 @@ class EditorDesktopTests(unittest.TestCase):
         self.assertTrue((directory / 'knowledge.sqlite').is_file())
         return directory
 
+    def render_current_preview(self):
+        # Synthetic adapter exercises B's asynchronous Qt delivery, not C parsing.
+        class Renderer:
+            async def render(self, context, snapshot, cancel):
+                return '<p>OLD_COLLECTION_PREVIEW</p>'
+        self.window.previews.renderer = Renderer()
+        self.window._refresh()
+        self.window._preview_timer.stop()
+        self.window._request_preview()
+        self.pump(lambda: self.window.preview.toPlainText() == 'OLD_COLLECTION_PREVIEW'
+                  and self.window.runtime.pending_count == 0
+                  and self.window.dispatcher.pending_count == 0)
+
     def test_startup_has_no_config_write_or_fake_saved_rows(self):
         self.assertFalse((self.root / 'config').exists())
         self.assertFalse(self.window.new_button.isEnabled())
@@ -109,6 +122,7 @@ class EditorDesktopTests(unittest.TestCase):
         first = self.activate()
         self.window.new_draft()
         self.window.body.setPlainText('retain this input when saving fails')
+        self.render_current_preview()
         before = self.window._current()
         with patch.object(self.window, '_ask_leave', return_value=LeaveChoice.SAVE):
             directory = self.root / 'second'
@@ -121,6 +135,7 @@ class EditorDesktopTests(unittest.TestCase):
         self.assertEqual(self.window.body.toPlainText(), before.snapshot.body)
         self.assertTrue(self.window.body.isEnabled())
         self.assertIn('STATE_BLOCKED', self.window.statusBar().currentMessage())
+        self.assertEqual(self.window.preview.toPlainText(), 'OLD_COLLECTION_PREVIEW')
 
     def test_rename_does_not_normalize_untouched_saved_markdown(self):
         from pmkb.application.editing.ports import SavedNote
@@ -365,6 +380,7 @@ class EditorDesktopTests(unittest.TestCase):
         first = self.activate()
         self.window.new_draft()
         self.window.body.setPlainText('keep on cancelled switch')
+        self.render_current_preview()
         before, context = self.window._current(), self.window.editing.context
         target = self.root / 'cancelled-target'
         target.mkdir()
@@ -376,6 +392,34 @@ class EditorDesktopTests(unittest.TestCase):
         self.assertEqual(self.window.body.toPlainText(), before.snapshot.body)
         self.assertEqual(self.window.location.text(), str(first.resolve()))
         self.assertTrue(self.window.body.isEnabled())
+        self.assertEqual(self.window.preview.toPlainText(), 'OLD_COLLECTION_PREVIEW')
+
+    def test_completed_preview_cleared_before_and_after_late_activation_outcome(self):
+        self.activate()
+        self.window.new_draft()
+        self.window.body.setPlainText('old collection draft')
+        self.render_current_preview()
+        old_context = self.window.editing.context
+        target = self.root / 'preview-target'
+        target.mkdir()
+        activated, held = self.window._activated, []
+        try:
+            with patch.object(self.window, '_ask_leave', return_value=LeaveChoice.DISCARD), \
+                 patch.object(self.window, '_activated', side_effect=held.append):
+                self.window.open_collection(ActivationMode.CREATE, target)
+                self.pump(lambda: bool(held))
+            # Final model/view installation completed; outcome is still withheld.
+            self.assertTrue(self.window._switching)
+            self.assertNotEqual(self.window.editing.context, old_context)
+            self.assertEqual(self.window.location.text(), str(target.resolve()))
+            self.assertIsNone(self.window._active_buffer)
+            self.assertEqual(self.window.editing.views(), ())
+            self.assertEqual(self.window.preview.toPlainText(), '请选择草稿。')
+        finally:
+            for result in held:
+                activated(result)
+        self.assertFalse(self.window._switching)
+        self.assertEqual(self.window.preview.toPlainText(), '请选择草稿。')
 
     def test_last_qt_activation_version_rejection_keeps_new_input_and_published_target(self):
         first = self.activate()
