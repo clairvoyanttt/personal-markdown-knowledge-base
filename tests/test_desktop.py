@@ -7,7 +7,9 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication
-from pmkb.desktop.app import create_main_window
+# These checks exercise A's no-editor shell; B's real editor has its own guards
+# and integration checks in test_editing_desktop.py.
+from pmkb.desktop.app import create_startup_window as create_main_window
 
 
 class DesktopStartupTests(unittest.TestCase):
