@@ -44,7 +44,7 @@ class StartupWindow(QMainWindow):
         self.close()
 
 
-def create_main_window() -> StartupWindow:
+def create_startup_window() -> StartupWindow:
     window = StartupWindow()
     window.setWindowTitle("Personal Markdown Knowledge Base · Python 开发基线")
     window.resize(820, 400)
@@ -68,6 +68,16 @@ def create_main_window() -> StartupWindow:
         layout.addWidget(label)
     window.setCentralWidget(body)
     return window
+
+
+def create_main_window(config_file=None, storage=None, preview_renderer=None):
+    # Import after StartupWindow exists: the editor extends its resource lifecycle.
+    import os
+    from pathlib import Path
+    from pmkb.desktop.editor import EditorWindow
+    if config_file is None:
+        config_file = Path(os.environ.get('LOCALAPPDATA', str(Path.home()))) / 'PersonalMarkdownKnowledgeBase' / 'collections.json'
+    return EditorWindow(Path(config_file), storage, preview_renderer)
 
 
 def main() -> int:

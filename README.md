@@ -6,7 +6,7 @@ Windows 11 个人本地 Markdown 笔记与知识管理工具，面向学生与�
 
 2026-10-18用户确认改用 **Python 3.12+ / PySide6 Qt Widgets / SQLite**，保持第一关第二版需求和业务范围；第一关v3暂不混入。C#方案已转为历史参考，未发布的C#骨架不保留在当前源码。
 
-目前图形界面仍是**开发启动壳**。A的API01集合协调、真实空SQLite集合创建/只读打开、身份登记及保护边界已实现，提供开发命令入口；公共类型、上下文保护、UTF16转换和基础检查可用。笔记编辑保存/CRUD、搜索引用、导出备份恢复尚未完成；单后台循环、Qt主线程回调与退出收尾已具备，B真实编辑会话接线仍待完成。基础检查不等于产品验收，V01—V16完整产品验证仍未执行。
+目前图形界面提供**B内存编辑开发工作台**，已接入A真实集合创建/打开/切换和真实草稿保护，支持名称/正文/标签编辑及手动保存/核实编排。C真实存储及统一解析/查询尚未接入，默认保存明确拒绝，不能把内存草稿当已持久化笔记；搜索引用、六类预览及导出备份恢复尚待联调。详见[B阶段实际交付与待接入](docs/development/b-editing.md)。公共类型、上下文保护、UTF16转换、单后台循环、Qt主线程回调和退出收尾可用。基础检查不等于产品验收，V01—V16完整产品验证仍未执行。
 
 ## 队友先看这些
 
@@ -20,6 +20,7 @@ Windows 11 个人本地 Markdown 笔记与知识管理工具，面向学生与�
 - [开发注意事项](docs/development/notes.md)、[Git协作](CONTRIBUTING.md)
 - [A集合模块接入与命令示例](docs/development/collection-lifecycle.md)
 - [后台运行、Qt回调与两阶段退出接入](docs/development/qt-runtime.md)
+- [B内存编辑、保存/核实与Qt会话接入](docs/development/b-editing.md)
 - [接口责任](docs/development/contracts.md)、[v3待同步](docs/development/pending-requirement-sync.md)
 
 ## 安装、检查、启动
