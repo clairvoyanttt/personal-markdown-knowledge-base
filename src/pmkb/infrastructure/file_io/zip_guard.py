@@ -14,6 +14,8 @@ import hmac
 import os
 from pathlib import Path
 import stat
+import struct
+from typing import Callable
 import unicodedata
 import zipfile
 import zlib
@@ -142,6 +144,105 @@ def _validate_metadata(infos: list[zipfile.ZipInfo], policy: ArchivePolicy) -> N
         raise ArchiveValidationError("missing_entry", "A required archive entry is missing.")
 
 
+def _verify_member_stream(
+    archive: zipfile.ZipFile, info: zipfile.ZipInfo, policy: ArchivePolicy, *,
+    remaining_total: int, remaining_capture: int | None = None,
+    check_cancel: Callable[[], None] | None = None,
+) -> None:
+    """Verify raw compressed bytes before trusting ZipExtFile's sized view.
+
+    Call INSIDE an already opened member, before its first read: ZipFile has
+    checked the local name, flags and overlap. This bounded extra pass uses
+    that same source handle; the member's shared reader seeks back afterwards.
+    In CPython 3.12, ZipExtFile truncates at the claimed uncompressed size and
+    can otherwise hide extra output, a missing end marker or trailing streams.
+    ZIP64 local extra fields and bit-3 descriptors remain supported: the parsed
+    central sizes define the compressed range, excluding the descriptor.
+    """
+    def cancelled() -> None:
+        if check_cancel is not None:
+            check_cancel()
+
+    def invalid(reason: str) -> None:
+        raise ArchiveValidationError("invalid_zip", reason, entry=info.orig_filename)
+
+    cancelled()
+    stream = archive.fp
+    if stream is None:
+        invalid("Archive source handle is closed.")
+    stream.seek(info.header_offset)
+    header = stream.read(30)
+    if len(header) != 30 or header[:4] != b"PK\x03\x04":
+        invalid("Entry local header is incomplete.")
+    name_size, extra_size = struct.unpack_from("<HH", header, 26)
+    start = info.header_offset + 30 + name_size + extra_size
+    # start_dir is the pinned CPython reader's parsed central-directory offset.
+    # Recheck the compressed extent independently of the declared output size.
+    boundary = min([archive.start_dir] + [other.header_offset for other in archive.infolist()
+                                        if other.header_offset > info.header_offset])
+    if info.header_offset < 0 or start > boundary or start + info.compress_size > boundary:
+        invalid("Entry compressed range overlaps another ZIP record.")
+    stream.seek(start)
+    remaining = info.compress_size
+    size, crc = 0, 0
+
+    def account(chunk: bytes) -> None:
+        nonlocal size, crc
+        size += len(chunk)
+        if size > policy.max_entry_bytes or size > remaining_total:
+            raise ArchiveValidationError("resource_budget", "Actual compressed-stream output exceeds the caller budget.", entry=info.orig_filename)
+        if remaining_capture is not None and size > remaining_capture:
+            raise ArchiveValidationError("capture_budget", "Actual compressed-stream capture exceeds the caller budget.", entry=info.orig_filename)
+        if size > info.file_size:
+            raise ArchiveValidationError("size_mismatch", "Compressed stream produces more than the claimed entry size.", entry=info.orig_filename)
+        crc = zlib.crc32(chunk, crc)
+
+    budget = min(policy.max_entry_bytes, remaining_total, info.file_size)
+    if remaining_capture is not None:
+        budget = min(budget, remaining_capture)
+    if info.compress_type == zipfile.ZIP_STORED:
+        while remaining:
+            cancelled()
+            amount = min(policy.chunk_size, remaining, budget - size + 1)
+            chunk = stream.read(amount)
+            if len(chunk) != amount:
+                invalid("Stored entry ends before its compressed range.")
+            remaining -= len(chunk)
+            account(chunk)
+    elif info.compress_type == zipfile.ZIP_DEFLATED:
+        decoder = zlib.decompressobj(-15)
+        pending = b""
+        while True:
+            cancelled()
+            if not pending and remaining:
+                amount = min(policy.chunk_size, remaining)
+                pending = stream.read(amount)
+                if len(pending) != amount:
+                    invalid("Deflated entry ends before its compressed range.")
+                remaining -= len(pending)
+            supplied = len(pending)
+            # Never pass zero (which means unlimited) or call unbounded flush.
+            # At most one extra output byte is needed to prove a limit breach.
+            chunk = decoder.decompress(pending, min(policy.chunk_size, budget - size + 1))
+            pending = decoder.unconsumed_tail
+            account(chunk)
+            if decoder.eof:
+                if decoder.unused_data or pending or remaining:
+                    invalid("Bytes remain after the deflate end marker.")
+                break
+            no_input_left = not pending and not remaining
+            no_input_progress = pending and len(pending) == supplied
+            if not chunk and (no_input_left or no_input_progress):
+                invalid("Deflate stream has no complete end marker.")
+    else:
+        invalid("Entry compression is not supported.")
+    cancelled()
+    if size != info.file_size:
+        raise ArchiveValidationError("size_mismatch", "Complete compressed-stream size differs from metadata.", entry=info.orig_filename)
+    if crc != info.CRC:
+        invalid("Complete compressed-stream CRC differs from metadata.")
+
+
 def inspect_zip(
     source: str | os.PathLike[str],
     policy: ArchivePolicy,
@@ -208,6 +309,10 @@ def inspect_zip(
                     digest = hashlib.sha256()
                     content = bytearray() if info.orig_filename in capture else None
                     with archive.open(info, "r") as member:
+                        _verify_member_stream(archive, info, policy,
+                            remaining_total=policy.max_total_uncompressed_bytes - total,
+                            remaining_capture=(policy.max_capture_bytes - captured
+                                               if content is not None else None))
                         while chunk := member.read(policy.chunk_size):
                             size += len(chunk)
                             total += len(chunk)
