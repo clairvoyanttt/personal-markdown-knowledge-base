@@ -173,10 +173,18 @@ class RestoreService:
         self._lock = asyncio.Lock()
 
     async def restore_backup(self, request: RestoreRequest, cancel: Event | None = None) -> OperationResult[RestoreReply]:
-        if not isinstance(request, RestoreRequest):
-            raise TypeError("Expected the D-draft RestoreRequest.")
-        if cancel is not None and not isinstance(cancel, Event):
-            raise ValueError("cancel must be threading.Event or None.")
+        # Invalid input has no operation-owned context or resources yet. Do not
+        # inspect the current session or wait for another restore to reject it.
+        context = CallContext(None, 0)
+        try:
+            if not isinstance(request, RestoreRequest):
+                raise OutputFailure("INVALID_ARGUMENT", "Expected the D-draft RestoreRequest.")
+            validate_context(request.context, require_active=False)
+            context = request.context
+            if cancel is not None and not isinstance(cancel, Event):
+                raise OutputFailure("INVALID_ARGUMENT", "cancel must be threading.Event or None.")
+        except OutputFailure as failure:
+            return result(context, ResultStatus.ERROR, error=failure.error)
         signal = cancel if cancel is not None else Event()
         await settle(self._lock.acquire(), signal)
         try:
