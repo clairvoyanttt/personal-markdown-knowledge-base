@@ -40,4 +40,4 @@ FR01/02/03/04/10；FR03中优先级也必须实现。NFR02/04/06；配合其余�
 
 ## 2026-11-03 单篇导出接线审查
 
-[B 单篇 Markdown 导出接线审查](../development/reviews/b-export-review-2026-11-03.md)记录 PR #14 的实际检查、默认名问题 B-REV-01 及返修要求。请在原 `feature/b-single-note-export` 分支追加修复，默认名必须取可信的已保存名称；当前尚未合并，不代表 C 真实导出源或完整产品验收已接通。
+[B 单篇 Markdown 导出接线审查](../development/reviews/b-export-review-2026-11-03.md)第 4 节记录默认名问题 B-REV-01 已修复并通过技术复审：使用可信的保存投影生成名称，未保存改名不影响默认名。原 B 实现与 `fix/b-export-default-name` 的修复一同由 PR #14 集成，实际合并状态以 PR 为准；C 真实导出源默认接入和完整产品验收仍未完成。
