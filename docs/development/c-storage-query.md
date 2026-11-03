@@ -79,14 +79,16 @@ API04/05 的 `SearchRequest`/`SearchReply`/`SavedViewRequest`/`SavedNoteView` �
 | `tests/test_c_query.py` | 19 | 连续字面匹配、ASCII 大小写、空/空白查询、无结果、标签 AND/区分大小写、集合隔离、改名保持关系、反向引用、删除不复活、外来/缺失、视图单事务与交错一致性、`)` 前空白真实保存 |
 | `tests/test_c_snapshot.py` | 15 | 快照一致性与身份账本、恢复初始化（READY/修订 1/初始化回执/引用重建）、保留已删除身份、目标所有权、竞争创建、候选在创建后/初始化后/发布前被替换、发布后目标被替换、内容与引用投影替换、回执与 displayHint 篡改 |
 | `tests/test_c_editing_adapter.py` | 12 | 与 B 真实服务联调、草稿不入检索、判重不写入、上下文过期、取消不写入、并发保存串行、无回执不判回滚、跨集合核实保持未知 |
+| `tests/test_c_export_source.py` | 5 | D 导出源：一致视图映射、引用分类/目标名、D `_projection` 接受、缺失保存版返回 None、过期上下文拒绝 |
+| `tests/test_c_restore_adapter.py` | 5 | D 恢复端口：真实快照 facts、D 清单交叉核对、归属转换与失效保留、非空目标拒绝、发布前候选替换保护 |
 
-合计 **102 项 C 用例**（一次性运行 `Ran 102 tests ... OK`）。首次运行时发现并修正的问题：
+合计 **112 项 C 用例**（一次性运行 `Ran 112 tests ... OK`）。首次运行时发现并修正的问题：
 测试用 `with sqlite3.Connection` 不关闭句柄导致 Windows 临时目录占用（改为 `closing`）；
 B 的草稿在首存前 `note_id` 为 `None`，证据断言改用 `SaveReply.note_id`。
 这些是测试/接线错误，不是业务规则放宽。
 
-全仓回归：`.venv\Scripts\python.exe scripts/check.py` 实际 **579 项发现、577 通过、2 项因
-Windows 符号链接权限跳过（exit code 0）**，其中 C 共 102 项；语法、公共契约导入与 `pip check` 均通过。
+全仓回归：`.venv\Scripts\python.exe scripts/check.py` 实际 **589 项发现、587 通过、2 项因
+Windows 符号链接权限跳过（exit code 0）**，其中 C 共 112 项；语法、公共契约导入与 `pip check` 均通过。
 （2 项跳过属于 D 的符号链接用例，不计为本批通过。）
 
 ### 4.1 NFR03 规模的 C 侧单机记录
@@ -114,9 +116,9 @@ Windows 符号链接权限跳过（exit code 0）**，其中 C 共 102 项；语
   真实界面里的保存版列表、搜索框、引用/反向引用面板、删除确认尚未接线。
 - **六类预览未渲染**：解析器提供结构块与跨度，但 B 的 `PreviewRenderer` 渲染适配未实现；
   FR03 预览验收未执行。
-- **D 的恢复端口未适配**：`initialize_restored_collection` 已有事务与测试，但 D 的
-  `RestoreStoragePorts.validate_snapshot`/`initialize_restore`/`release` 适配、清单交叉核对、
-  发布与 `source_snapshot_sha256` 计算尚未做，FR11 未联调。
+- **D 的恢复发布约定未确认**：C 侧已实现 `CRestoreStorage`（`validate_snapshot`/`initialize_restore`/`release`），
+  但 A 的 `RestoreTargetPort.publish` 仍未实现，C 提议的“目标目录内私有候选 + 非覆盖发布”布局需 A 确认；
+  FR11 端到端未联调。
 - **未执行**：V01/V04/V05/V06/V10/V14 整组验收；NFR03 的正式验收流程（固定数据集版本、预热/后台负载/
   顺序记录、A 侧复核）；Windows 11 人工界面/离线/隐私检查；跨模块故障注入联调。4.1 的单机数据只是
   C 侧实际记录，不能直接写成 NFR03 通过。
@@ -253,3 +255,22 @@ C-REV-07（验证未比对期望内容）。两项均在原分支追加修复。
 
 本轮实际检查：C 用例 **102 项全部通过**；全仓 `scripts/check.py` **579 项发现、577 通过、
 2 项符号链接权限跳过，exit code 0**。仍未执行产品验收。
+
+## 9. D 端口适配（C 侧，2026-11-03）
+
+按 `docs/development/d-output-interfaces.md` 的端口表，C 侧补齐了两个 D 端口，D 只需接线：
+
+| 文件 | 内容 |
+|---|---|
+| `infrastructure/storage/export_source.py` | `CExportSource` 实现 `ExportSourcePort.read_saved`：用单事务 `saved_view` 产出 `SavedExportNote`（笔记修订、集合修订、名称、正文、分类引用与目标名）；`ReferenceState` 的取值直接映射 D 的 `ReferenceKind`；无保存版返回 `None`，过期上下文拒绝。 |
+| `infrastructure/storage/restore_plan.py` | `build_restore_payload` / `count_snapshot_references`：把已保存快照转换为 `RestoredNote` / `RetainedIdentity`，只转换共享解析器授权的来源归属，外来标记保持原文，删除/缺失目标保留身份与历史名。 |
+| `infrastructure/storage/restore_storage.py` | `CRestoreStorage` 实现 `RestoreStoragePort`：`validate_snapshot` 真实打开快照并核对身份/修订/数量/引用分类/摘要/大小；`initialize_restore` 在空目标目录创建私有候选并调用 `initialize_restored_collection`，返回 `InitializedRestore`（集合修订 1、初始化数量一致、源摘要）；`release` 只删除身份匹配的自有候选。 |
+
+**待 A 确认的约定（当前唯一阻塞）**：A 的 `RestoreTargetPort.publish` 尚未实现。C 提议的产物布局是：
+`initialize_restore` 在目标目录内创建 `.pmkb-restore-<token>.sqlite` 私有候选，`InitializedRestore.token`
+为该候选的绝对路径；A 的 `publish` 在最终边界核对目标仍为空、候选属于本次操作且为 READY 有效产物，
+然后同目录硬链接为 `knowledge.sqlite` 并移除候选。A 确认或调整该约定后，FR11 才能端到端联调。
+
+回归：`tests/test_c_export_source.py` 5 项、`tests/test_c_restore_adapter.py` 5 项；其中导出投影由 D 的
+`_projection` 实际校验，恢复 facts 由 D 的 `check_manifest_against_facts` 实际交叉核对。
+全仓 `scripts/check.py`：**589 项发现、587 通过、2 项符号链接权限跳过，exit code 0**。
