@@ -396,6 +396,48 @@ class RestoreInitTests(unittest.TestCase):
                 )
         self.assertFalse(path.exists())
 
+    def test_receipt_and_display_hint_tampering_is_rejected(self) -> None:
+        # Fourth-round follow-up: receipt ownership fields and display hints belong
+        # to the expected projection too, not only note/tag/reference columns.
+        marker = format_reference_marker("d" * 32, new_identifier())
+        real_publish = writing._publish_candidate
+        note_id = new_identifier()
+
+        mutations = {
+            "receipt-collection": lambda connection, nid: connection.execute(
+                "UPDATE CommitReceipt SET collectionId=? WHERE operationKind='RESTORE_NOTE_INIT'",
+                ("e" * 32,)),
+            "receipt-note": lambda connection, nid: connection.execute(
+                "UPDATE CommitReceipt SET noteId=? WHERE operationKind='RESTORE_NOTE_INIT'",
+                (new_identifier(),)),
+            "init-collection": lambda connection, nid: connection.execute(
+                "UPDATE CommitReceipt SET collectionId=? WHERE operationKind='RESTORE_INIT'",
+                ("e" * 32,)),
+            "display-hint": lambda connection, nid: connection.execute(
+                "UPDATE RefOccurrence SET displayHint='legacy hint' WHERE sourceNoteId=?", (nid,)),
+        }
+        for label, mutation in mutations.items():
+            with self.subTest(mutation=label):
+                path = self.root / f"restored-{label}.sqlite"
+
+                def mutating_publish(candidate, identity, target, expected, action=mutation):
+                    connection = sqlite3.connect(candidate, autocommit=True)
+                    try:
+                        connection.execute("BEGIN IMMEDIATE")
+                        action(connection, note_id)
+                        connection.execute("COMMIT")
+                    finally:
+                        connection.close()
+                    return real_publish(candidate, identity, target, expected)
+
+                with mock.patch.object(writing, "_publish_candidate", mutating_publish):
+                    with self.assertRaises(StorageFailure):
+                        initialize_restored_collection(
+                            path, new_collection_id=new_identifier(),
+                            notes=(RestoredNote(note_id, "N", f"前缀 {marker}", ()),),
+                        )
+                self.assertFalse(path.exists())
+
     def test_duplicate_note_identities_in_payload_are_rejected(self) -> None:
         note_id = new_identifier()
         path = self.root / "duplicate.sqlite"
