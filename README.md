@@ -6,14 +6,14 @@ Windows 11 个人本地 Markdown 笔记与知识管理工具，面向学生与�
 
 2026-10-18用户确认改用 **Python 3.12+ / PySide6 Qt Widgets / SQLite**，保持第一关第二版需求和业务范围；第一关v3暂不混入。C#方案已转为历史参考，未发布的C#骨架不保留在当前源码。
 
-目前图形界面提供**B内存编辑开发工作台**，已接入A真实集合创建/打开/切换和真实草稿保护，支持名称/正文/标签编辑及手动保存/核实编排。C真实存储及统一解析/查询尚未接入，默认保存明确拒绝，不能把内存草稿当已持久化笔记；搜索引用、六类预览及导出备份恢复尚待联调。详见[B阶段实际交付与待接入](docs/development/b-editing.md)。公共类型、上下文保护、UTF16转换、单后台循环、Qt主线程回调和退出收尾可用。基础检查不等于产品验收，V01—V16完整产品验证仍未执行。
+目前图形界面提供**B内存编辑开发工作台**，已接入A真实集合创建/打开/切换和真实草稿保护，支持名称/正文/标签编辑及手动保存/核实编排。C真实存储、受控事务、共享解析与保存版查询已实现并有真实SQLite测试（见[C 交付](docs/development/c-storage-query.md)），但尚未接入Qt界面：默认保存仍明确拒绝，不能把内存草稿当已持久化笔记；搜索引用、六类预览及导出备份恢复尚待联调。详见[B阶段实际交付与待接入](docs/development/b-editing.md)。公共类型、上下文保护、UTF16转换、单后台循环、Qt主线程回调和退出收尾可用。基础检查不等于产品验收，V01—V16完整产品验证仍未执行。
 
 ## 队友先看这些
 
 - **[第一次接手：操作清单与注意事项](docs/development/notes.md)**
 - [四人计划与分工](docs/team-plan.md)：按依赖尽快推进，不等待原拟定五周。
 - **[B：界面与编辑保存](docs/tasks/B-ui-editing.md)**
-- **[C：存储、检索与引用](docs/tasks/C-storage-search-references.md)**
+- **[C：存储、检索与引用](docs/tasks/C-storage-search-references.md)**、[C 已交付的规则/事务/解析/查询](docs/development/c-storage-query.md)
 - **[D：导出、备份与恢复](docs/tasks/D-export-backup-restore.md)**
 - [D 工作总清单与实际进度](docs/development/d-progress.md)：区分组件完成、独立待办、真实联调与产品验收。
 - [A：当前进度和后续集合任务](docs/tasks/A-baseline-integration.md)
