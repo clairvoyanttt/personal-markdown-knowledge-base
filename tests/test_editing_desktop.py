@@ -189,6 +189,26 @@ class EditorDesktopTests(unittest.TestCase):
         self.assertTrue(cancelled.is_set())
         self.assertFalse(destination.exists())
 
+    def test_production_storage_and_preview_on_real_collection(self):
+        from pmkb.desktop.markdown_preview import SharedMarkdownPreview
+        self.shutdown()
+        self.window = create_main_window(self.root / 'config' / 'collections.json',
+            preview_renderer=SharedMarkdownPreview(), use_collection_storage=True)
+        self.window.show()
+        self.activate()
+        self.window.new_draft()
+        self.window.name.setText('saved')
+        self.window._apply_name()
+        self.window.body.setPlainText('# title\n\n> quote\n\n- item\n\ntext `code` <img src=x>\n\n```\n<tag>\n```')
+        self.window.save_current()
+        self.pump(lambda: self.window._current().snapshot.base_revision == 1)
+        self.pump(lambda: '<img src=x>' in self.window.preview.toPlainText())
+        old = self.window._owned_storage
+        self.activate('second')
+        self.pump(lambda: old._closed)
+        self.assertIsNot(self.window.editing.storage, old)
+        self.assertFalse(self.window.editing.views())
+
     def test_startup_has_no_config_write_or_fake_saved_rows(self):
         self.assertFalse((self.root / 'config').exists())
         self.assertFalse(self.window.new_button.isEnabled())

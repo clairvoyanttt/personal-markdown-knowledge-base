@@ -2,6 +2,7 @@
 from dataclasses import dataclass
 from pathlib import Path
 import secrets
+import asyncio
 
 from PySide6.QtCore import Qt, QSignalBlocker, QTimer
 from PySide6.QtGui import QKeySequence, QShortcut
@@ -31,6 +32,10 @@ from pmkb.contracts.commit_resolution import (
 from pmkb.desktop.app import StartupWindow
 from pmkb.desktop.composition import ApplicationServices
 from pmkb.desktop.editor_session import EditorSession
+
+
+from pmkb.infrastructure.storage.editing_storage import SqliteEditingStorage
+from pmkb.infrastructure.storage.store import CollectionStore
 
 
 class LocalPreview(QTextBrowser):
@@ -68,7 +73,7 @@ class CapturedExportSource:
 
 
 class EditorWindow(StartupWindow):
-    def __init__(self, config_file: Path, storage=None, preview_renderer=None, *, export_source=None):
+    def __init__(self, config_file: Path, storage=None, preview_renderer=None, *, export_source=None, use_collection_storage=False):
         config_file = Path(config_file)
         if not config_file.is_absolute():
             raise ValueError('The application must supply an absolute configuration path.')
@@ -77,6 +82,10 @@ class EditorWindow(StartupWindow):
         self.session = EditorSession(self.editing, self.dispatcher,
                                      install_view=self._install_collection_view)
         self.services = ApplicationServices.compose(self.session, config_file, self.runtime)
+        self._use_collection_storage = use_collection_storage
+        self._owned_storage = None
+        if use_collection_storage:
+            self.runtime.add_finalizer(self._close_collection_storage)
         self.export_source = export_source
         self.previews = PreviewService(self.editing, preview_renderer)
         self._preview_timer = QTimer(self)
@@ -196,6 +205,21 @@ class EditorWindow(StartupWindow):
         if self._active_buffer:
             self._draft_text_inputs[self._active_buffer] = text
 
+    async def _close_collection_storage(self):
+        if self._owned_storage is not None:
+            await asyncio.to_thread(self._owned_storage.close)
+
+    def _bind_collection_storage(self):
+        previous = self._owned_storage
+        context = self.editing.context
+        store = CollectionStore(Path(self.session.directory) / 'knowledge.sqlite',
+                                context.collection_id)
+        self._owned_storage = self.editing.storage = SqliteEditingStorage(store)
+        if previous is not None:
+            async def retire(cancel):
+                await asyncio.to_thread(previous.close)
+            self.runtime.submit(retire)
+
     def _install_collection_view(self):
         """Final Qt activation boundary, not a later outcome presentation.
 
@@ -204,6 +228,8 @@ class EditorWindow(StartupWindow):
         disabled empty editors before returning to Qt's event queue. Rejected
         or cancelled activation never calls this method.
         """
+        if self._use_collection_storage:
+            self._bind_collection_storage()
         self._active_buffer = None
         self._draft_text_inputs.clear()
         self._preview_timer.stop()
