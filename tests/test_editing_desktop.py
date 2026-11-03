@@ -68,6 +68,48 @@ class EditorDesktopTests(unittest.TestCase):
                   and self.window.runtime.pending_count == 0
                   and self.window.dispatcher.pending_count == 0)
 
+    def test_export_saved_only_and_reject_edit_after_confirmation(self):
+        import asyncio
+        from pmkb.application.export.service import SavedExportNote
+
+        class Source:
+            async def read_saved(self, context, note_id, cancel):
+                return SavedExportNote(context, note_id, 1, 2, 'saved name', 'saved body', ())
+
+        self.activate()
+        self.window.editing.storage = MemoryStorage()
+        self.window.export_source = Source()
+        loaded = asyncio.run(self.window.editing.load_note(
+            LoadNoteRequest(self.window.editing.context, 'b' * 32)))
+        self.window._active_buffer = loaded.value.snapshot.buffer_id
+        self.window._refresh(refresh_text=True)
+        self.window.body.setPlainText('unsaved text')
+        destination = self.root / 'saved.md'
+
+        def accept(dialog):
+            dialog.buttons()[0].click()
+
+        def choose(*args, **kwargs):
+            self.window.body.setPlainText('edited while choosing')
+            return str(destination), ''
+
+        with patch.object(QMessageBox, 'exec', accept), \
+             patch('pmkb.desktop.editor.QFileDialog.getSaveFileName', side_effect=choose):
+            self.window.export_button.click()
+        self.assertFalse(destination.exists())
+        self.assertEqual(self.window.runtime.pending_count, 0)
+
+        with patch.object(QMessageBox, 'exec', accept), \
+             patch('pmkb.desktop.editor.QFileDialog.getSaveFileName', return_value=(str(destination), '')):
+            self.window.export_button.click()
+            self.pump(lambda: self.window.statusBar().currentMessage().startswith('已导出'))
+            self.assertEqual(destination.read_bytes(), b'saved body')
+            self.window.export_button.click()
+            self.pump(lambda: 'TARGET_EXISTS' in self.window.statusBar().currentMessage())
+        self.assertEqual(destination.read_bytes(), b'saved body')
+        self.assertEqual(self.window.body.toPlainText(), 'edited while choosing')
+        self.assertTrue(self.window._current().is_dirty)
+
     def test_startup_has_no_config_write_or_fake_saved_rows(self):
         self.assertFalse((self.root / 'config').exists())
         self.assertFalse(self.window.new_button.isEnabled())
