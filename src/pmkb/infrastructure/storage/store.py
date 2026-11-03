@@ -18,6 +18,7 @@ from pmkb.infrastructure.storage.reader import (
     CollectionSnapshot,
     NoteSummary,
     SavedNoteData,
+    SavedViewData,
     SearchPage,
 )
 from pmkb.infrastructure.storage.writing import CommitResult
@@ -119,6 +120,10 @@ class CollectionStore:
 
     def backlinks(self, note_id: str) -> tuple[BacklinkSource, ...]:
         return reader.list_backlinks(self._database, self._collection_id, note_id)
+
+    def saved_view(self, note_id: str) -> SavedViewData | None:
+        """Saved note + references + backlinks from one consistent snapshot."""
+        return reader.saved_view(self._database, self._collection_id, note_id)
 
     def classify(self, document: ParsedDocument) -> tuple[ResolvedReference, ...]:
         return reader.classify_references(self._database, self._collection_id, document)

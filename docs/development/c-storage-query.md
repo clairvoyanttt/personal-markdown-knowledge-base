@@ -74,19 +74,19 @@ API04/05 的 `SearchRequest`/`SearchReply`/`SavedViewRequest`/`SavedNoteView` �
 | 用例文件 | 数量 | 覆盖 |
 |---|---:|---|
 | `tests/test_c_naming.py` | 17 | 100/101 码点、30/31 标签、20/21 项、控制字符先拒绝、明确空白、ASCII 键、代理项、标记格式 |
-| `tests/test_c_parsing.py` | 17 | 代码/外链/图片/转义/引用定义保护、完整标记、外来归属、UTF-16（😀/CRLF）、六类块、坏输入 |
+| `tests/test_c_parsing.py` | 19 | 代码/外链/图片/转义/引用定义保护、撇号与引号、完整跨度切片、完整标记、外来归属、UTF-16（😀/CRLF）、六类块、坏输入 |
 | `tests/test_c_storage.py` | 19 | 新保存/二次保存/base 冲突、判重、重复命令、外键、触发器、指纹注入回滚、引用替换、删除级联、回执复读、`UNRESOLVED` |
-| `tests/test_c_query.py` | 16 | 连续字面匹配、ASCII 大小写、空/空白查询、无结果、标签 AND/区分大小写、集合隔离、改名保持关系、反向引用、删除不复活、外来/缺失 |
-| `tests/test_c_snapshot.py` | 6 | 快照一致性与身份账本、恢复初始化（READY/修订 1/初始化回执/引用重建）、保留已删除身份、拒绝已存在目标、坏输入不留文件 |
-| `tests/test_c_editing_adapter.py` | 11 | 与 B 真实服务联调、草稿不入检索、判重不写入、上下文过期、取消不写入、并发保存串行、无回执不判回滚 |
+| `tests/test_c_query.py` | 18 | 连续字面匹配、ASCII 大小写、空/空白查询、无结果、标签 AND/区分大小写、集合隔离、改名保持关系、反向引用、删除不复活、外来/缺失、视图单事务与交错一致性 |
+| `tests/test_c_snapshot.py` | 8 | 快照一致性与身份账本、恢复初始化（READY/修订 1/初始化回执/引用重建）、保留已删除身份、目标所有权与竞争创建、拒绝已存在目标、坏输入不留候选 |
+| `tests/test_c_editing_adapter.py` | 12 | 与 B 真实服务联调、草稿不入检索、判重不写入、上下文过期、取消不写入、并发保存串行、无回执不判回滚、跨集合核实保持未知 |
 
-合计 **86 项 C 用例**（一次性运行 `Ran 86 tests ... OK`）。首次运行时发现并修正的问题：
+合计 **93 项 C 用例**（一次性运行 `Ran 93 tests ... OK`）。首次运行时发现并修正的问题：
 测试用 `with sqlite3.Connection` 不关闭句柄导致 Windows 临时目录占用（改为 `closing`）；
 B 的草稿在首存前 `note_id` 为 `None`，证据断言改用 `SaveReply.note_id`。
 这些是测试/接线错误，不是业务规则放宽。
 
-全仓回归：`.venv\Scripts\python.exe scripts/check.py` 实际 **561 项发现、559 通过、2 项因
-Windows 符号链接权限跳过（exit code 0）**，其中 C 新增 86 项；语法、公共契约导入与 `pip check` 均通过。
+全仓回归：`.venv\Scripts\python.exe scripts/check.py` 实际 **568 项发现、566 通过、2 项因
+Windows 符号链接权限跳过（exit code 0）**，其中 C 共 93 项；语法、公共契约导入与 `pip check` 均通过。
 （2 项跳过属于 D 的符号链接用例，不计为本批通过。）
 
 ### 4.1 NFR03 规模的 C 侧单机记录
@@ -149,3 +149,24 @@ py -3.12 -m venv .venv
 2. D 与 C 核对 `CollectionSnapshot` 与恢复端口，补 `validate_snapshot`/`initialize_restore` 适配与清单交叉核对（API09）。
 3. A/B 在真实界面下跑保存→重开→搜索→引用→删除闭环，再补 V01/V04/V05/V06 的实际记录。
 4. 把 4.1 的单机规模记录并入 NFR03 正式验收（固定数据集版本、预热/负载/顺序、A 侧复核）。
+
+## 8. 2026-11-03 复审返修记录（C-REV-01—05）
+
+复审依据：[C 后端交付审查与修改清单](reviews/c-backend-review-2026-11-03.md)（已发布到 main `9ddac57`）。
+返修仍提交在原分支 `feature/c-3-storage-query`，未重做、未另起分支、未改写已共享历史。
+
+| 编号 | 修改位置 | 修改内容 | 实际回归结果 |
+|---|---|---|---|
+| C-REV-01（P1） | `writing.py::initialize_restored_collection`，新增 `_create_candidate`/`_candidate_identity`/`_discard_candidate`/`_publish_candidate` | 不再用 `exists()` 当所有权证明：先在同一目录用 `O_CREAT\|O_EXCL` 独占创建私有候选并记录 `(st_dev, st_ino)`，初始化全部在候选内完成，再用同目录硬链接原子发布且不覆盖；异常清理由 `finally` 执行，但只在文件身份仍与本操作记录一致时删除 | 目标已存在 → `TARGET_EXISTS`，原字节逐字节不变、无候选残留；竞争者在发布前创建目标 → `TARGET_EXISTS`，对方字节不变、无候选残留；候选被替换 → 不删除替换者（保留 `intruder bytes`）；正常初始化、保留身份与初始化回执用例继续通过 |
+| C-REV-02（P2） | `reader.py::saved_view`（新增 `SavedViewData`、`_classify_with`、`_backlink_rows`）、`store.py::saved_view`、`query/service.py::saved_view` | 正文、标签、引用分类、反向引用和集合版本改为在**同一个只读事务**内读取；服务层不再分四次调用 `load_note`/`classify`/`backlinks`/`metadata` | 结构回归：一次视图只开 1 个连接、恰好 1 次 `BEGIN` 与 1 次 `COMMIT`；交错回归：真实 SAVE 线程持续改写时，120 次视图的正文、引用数、`collectionRevision` 均对应同一保存时刻（`collectionRevision == revision + 2`），无拼接 |
+| C-REV-03（P2） | `markdown.py::_link_end`、`_balanced`、`_destination_end`、`_bare_destination_end`、`_quoted_end`、`_parenthesised_end` | 链接标签只做括号配平，撇号/双引号按普通字符；目的地址区分裸地址、`<>` 地址和可选标题，引号只在标题位置生效，因此 URL 中的撇号/双引号不会吞掉闭合括号 | 复审三个复现样例（含 `don't` 的链接标签、图片、URL）引用数均为 0 且产生对应保护跨度；额外覆盖双引号 URL、行内代码、嵌套括号、转义；普通正文有效标记与反向引用正向用例仍通过 |
+| C-REV-04（P3） | `markdown.py::_link_end` | 返回闭合括号后一位，使排他跨度包含完整构造（原先漏掉最后的 `)`） | 普通链接、图片、带标题链接、`<>` 地址、嵌套括号与 `😀` 前缀样例的 `slice_span` 均等于完整原构造 |
+| C-REV-05（补充核对） | `editing_storage.py::check_save` | 适配器集合不匹配时返回 `UNRESOLVED`（`COMMIT_UNCONFIRMED`），不再返回 `NOT_COMMITTED`；`save()` 的保存前取消与上下文拒绝语义未改 | 原命令已在集合 A 提交：A 适配器核实为 `COMMITTED`（修订 1）；交给集合 B 的适配器核实为 `UNRESOLVED`、`saved_revision`/`collection_revision` 均为空，不解除 B 的待核实保护 |
+
+返修后实际检查：
+
+- C 用例 **93 项全部通过**（原 86 项 + 7 项针对性回归）。
+- 全仓 `scripts/check.py`：**568 项发现、566 通过、2 项因 Windows 符号链接权限（1314）跳过，exit code 0**；跳过项不计为通过。
+- 未因返修改动 `contracts/`、B/D 模块、依赖版本或已验证的保存/删除回执语义；未新增第三方依赖。
+- 仍未执行（与本轮修复无关，如实保留）：Qt 界面接线、六类预览渲染、D 恢复端口适配、V01—V16 整组验收、
+  NFR03 正式流程。返修通过只说明上述五项已处理，不代表 C 后端已合并或产品验收完成。

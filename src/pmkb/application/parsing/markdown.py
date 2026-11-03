@@ -265,51 +265,147 @@ def _code_span_end(text: str, start: int, end: int) -> int | None:
 
 
 def _link_end(text: str, open_index: int, end: int) -> int | None:
-    """Return the exclusive end of ``[text](dest "title")`` / ``[text][label]``.
+    """Return the exclusive end of an inline link, image or reference link.
 
-    Brackets in the link text are balanced; parentheses in the destination are
-    balanced outside backslash escapes and quotes. An unmatched construct is not
-    a link and leaves the text unprotected (so a stray ``[`` stays literal).
+    Link *text* only balances brackets: an apostrophe or double quote there is
+    ordinary text, not a quoting state (C-REV-03). The destination part separates
+    a bare/angle destination from an optional title, so a quote or parenthesis
+    inside a URL cannot hide the closing ``)`` and leave a marker unprotected.
+    The returned index is one past the closing delimiter so a protected span
+    covers the complete construct (C-REV-04).
     """
-    close = _balanced(text, open_index, end, "[", "]")
+    close = _balanced(text, open_index, end)
     if close is None:
         return None
     after = close + 1
     if after >= end:
         return None
     if text[after] == "(":
-        destination_end = _balanced(text, after, end, "(", ")")
-        return destination_end
+        return _destination_end(text, after + 1, end)
     if text[after] == "[":
-        label_close = _balanced(text, after, end, "[", "]")
-        return label_close + 1 if label_close is not None else None
+        label_close = _balanced(text, after, end)
+        return None if label_close is None else label_close + 1
     return None
 
 
-def _balanced(text: str, open_index: int, end: int, opening: str, closing: str) -> int | None:
+def _balanced(text: str, open_index: int, end: int) -> int | None:
+    """Index of the ``]`` closing the ``[`` at ``open_index``, honouring escapes."""
     depth = 0
     cursor = open_index
-    quote: str | None = None
     while cursor < end:
         character = text[cursor]
         if character == "\\" and cursor + 1 < end:
             cursor += 2
             continue
-        if quote is not None:
-            if character == quote:
-                quote = None
-            cursor += 1
-            continue
-        if character in "\"'":
-            quote = character
-            cursor += 1
-            continue
-        if character == opening:
+        if character == "[":
             depth += 1
-        elif character == closing:
+        elif character == "]":
             depth -= 1
             if depth == 0:
                 return cursor
+        cursor += 1
+    return None
+
+
+def _destination_end(text: str, cursor: int, end: int) -> int | None:
+    """Parse ``destination [title] )``; return the index after the closing paren."""
+    cursor = _skip_blank(text, cursor, end)
+    if cursor < end and text[cursor] == "<":
+        cursor = _angle_end(text, cursor, end)
+    else:
+        cursor = _bare_destination_end(text, cursor, end)
+    if cursor is None or cursor >= end:
+        return None
+    if text[cursor] == ")":
+        return cursor + 1
+    cursor = _skip_blank(text, cursor, end)
+    if cursor >= end:
+        return None
+    if text[cursor] in "\"'":
+        cursor = _quoted_end(text, cursor, end)
+    elif text[cursor] == "(":
+        cursor = _parenthesised_end(text, cursor, end)
+    else:
+        return None
+    if cursor is None:
+        return None
+    cursor = _skip_blank(text, cursor, end)
+    if cursor < end and text[cursor] == ")":
+        return cursor + 1
+    return None
+
+
+def _skip_blank(text: str, cursor: int, end: int) -> int:
+    while cursor < end and text[cursor] in " \t\r\n":
+        cursor += 1
+    return cursor
+
+
+def _angle_end(text: str, cursor: int, end: int) -> int | None:
+    """Return the index after ``<destination>``."""
+    cursor += 1
+    while cursor < end:
+        character = text[cursor]
+        if character == "\\" and cursor + 1 < end:
+            cursor += 2
+            continue
+        if character == ">":
+            return cursor + 1
+        if character == "<":
+            return None
+        cursor += 1
+    return None
+
+
+def _bare_destination_end(text: str, cursor: int, end: int) -> int | None:
+    """Return where a bare destination ends (blank at depth 0 or the closing ``)``)."""
+    depth = 0
+    while cursor < end:
+        character = text[cursor]
+        if character == "\\" and cursor + 1 < end:
+            cursor += 2
+            continue
+        if character in " \t\r\n":
+            return cursor if depth == 0 else None
+        if character == "(":
+            depth += 1
+        elif character == ")":
+            if depth == 0:
+                return cursor
+            depth -= 1
+        cursor += 1
+    return None
+
+
+def _quoted_end(text: str, cursor: int, end: int) -> int | None:
+    """Return the index after a quoted title (``"..."`` or ``'...'``)."""
+    quote = text[cursor]
+    cursor += 1
+    while cursor < end:
+        character = text[cursor]
+        if character == "\\" and cursor + 1 < end:
+            cursor += 2
+            continue
+        if character == quote:
+            return cursor + 1
+        cursor += 1
+    return None
+
+
+def _parenthesised_end(text: str, cursor: int, end: int) -> int | None:
+    """Return the index after a parenthesised title ``(...)``."""
+    depth = 0
+    while cursor < end:
+        character = text[cursor]
+        if character == "\\" and cursor + 1 < end:
+            cursor += 2
+            continue
+        if character == "(":
+            depth += 1
+        elif character == ")":
+            depth -= 1
+            if depth == 0:
+                return cursor + 1
         cursor += 1
     return None
 

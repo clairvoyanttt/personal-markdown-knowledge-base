@@ -32,8 +32,8 @@ from pmkb.infrastructure.storage.store import CollectionStore
 from pmkb.application.query.service import SavedQueryService, SavedViewRequest, SearchRequest
 
 
-def new_collection(root: Path) -> tuple[Path, str]:
-    directory = root / "collection"
+def new_collection(root: Path, name: str = "collection") -> tuple[Path, str]:
+    directory = root / name
     directory.mkdir()
     backend = LocalCollectionBackend()
     prepared = backend.prepare(ActivationMode.CREATE, str(directory))
@@ -149,6 +149,30 @@ class EditingIntegrationTests(unittest.TestCase):
         self.assertIs(evidence.state, SaveEvidenceState.NOT_COMMITTED)
         self.assertEqual(evidence.error.code, "STALE_CONTEXT")
         self.assertEqual(self.store.summaries(), ())
+
+    def test_foreign_collection_adapter_cannot_claim_not_committed(self) -> None:
+        # C-REV-05: the original command did commit; verifying it through another
+        # collection's adapter must stay UNRESOLVED instead of reporting a rollback
+        # that would release B's pending-save protection.
+        snapshot = self.create_and_edit()
+        command = new_identifier()
+        reply = asyncio.run(self.service.save_note(
+            SaveNoteRequest(self.context, command, snapshot)))
+        self.assertIs(reply.value.state, SaveState.COMMITTED)
+        attempt = SaveAttempt(self.context, command, new_identifier(),
+                              reply.value.note_id, snapshot)
+
+        committed = asyncio.run(self.adapter.check_save(attempt, Event()))
+        self.assertIs(committed.state, SaveEvidenceState.COMMITTED)
+        self.assertEqual(committed.saved_revision, 1)
+
+        other_db, other_id = new_collection(self.root, "other")
+        with SqliteEditingStorage(CollectionStore(other_db, other_id)) as foreign:
+            evidence = asyncio.run(foreign.check_save(attempt, Event()))
+        self.assertIs(evidence.state, SaveEvidenceState.UNRESOLVED)
+        self.assertIsNone(evidence.saved_revision)
+        self.assertIsNone(evidence.collection_revision)
+        self.assertEqual(evidence.error.code, "COMMIT_UNCONFIRMED")
 
     def test_cancelled_before_dispatch_writes_nothing(self) -> None:
         snapshot = DraftSnapshot(new_identifier(), None, None, 0, "N", "b", ())

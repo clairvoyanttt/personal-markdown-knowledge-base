@@ -93,6 +93,27 @@ class ProtectionTests(unittest.TestCase):
         self.assertHidden(f"<https://example.com/?q={MARKER}>", ProtectedKind.AUTOLINK)
         self.assertHidden(f"\\{MARKER} 转义", ProtectedKind.ESCAPED)
 
+    def test_apostrophes_in_link_text_and_url_keep_markers_protected(self) -> None:
+        # C-REV-03: a quote inside link text or a bare URL is ordinary text, not a
+        # quoting state that swallows the closing delimiter.
+        examples = (
+            f"[don't {MARKER}](https://example.com)",
+            f"![don't {MARKER}](image.png)",
+            f"[label](https://example.com/don't/{MARKER})",
+            f'[label](https://example.com/don"t/{MARKER})',
+            f"`don't {MARKER}`",
+        )
+        for body in examples:
+            with self.subTest(body=body):
+                document = parse_markdown(body, COLLECTION)
+                self.assertEqual(document.references, ())
+                self.assertTrue(
+                    any(span.kind in {ProtectedKind.LINK, ProtectedKind.IMAGE,
+                                      ProtectedKind.INLINE_CODE}
+                        for span in document.protected_spans),
+                    f"nothing was protected in {body!r}",
+                )
+
     def test_reference_definition_line_is_protected(self) -> None:
         body = f"[doc]: https://example.com/{MARKER}\n\n{MARKER}"
         document = parse_markdown(body, COLLECTION)
@@ -114,6 +135,27 @@ class ProtectionTests(unittest.TestCase):
 
 
 class SpanAndBlockTests(unittest.TestCase):
+    def test_link_protection_span_covers_the_complete_construct(self) -> None:
+        # C-REV-04: the exclusive span end must be one past the closing paren.
+        cases = (
+            ("[x](https://example.com)", "[x](https://example.com)"),
+            ("![i](img.png)", "![i](img.png)"),
+            ('[x](https://example.com "title")', '[x](https://example.com "title")'),
+            ("[a [b] c](https://example.com)", "[a [b] c](https://example.com)"),
+            ("😀 [x](https://example.com)", "[x](https://example.com)"),
+            ("[x](<https://example.com/a b>)", "[x](<https://example.com/a b>)"),
+        )
+        for body, expected in cases:
+            with self.subTest(body=body):
+                document = parse_markdown(body, COLLECTION)
+                spans = [span for span in document.protected_spans
+                         if span.kind in {ProtectedKind.LINK, ProtectedKind.IMAGE}]
+                self.assertEqual(len(spans), 1)
+                self.assertEqual(
+                    document.slice_span(spans[0].start_utf16, spans[0].length_utf16),
+                    expected,
+                )
+
     def test_utf16_offsets_shift_after_astral_characters(self) -> None:
         body = "😀😀" + MARKER
         document = parse_markdown(body, COLLECTION)

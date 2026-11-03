@@ -6,11 +6,13 @@ from datetime import timezone
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from pmkb.application.parsing import ReferenceState, parse_markdown
 from pmkb.contracts.collections import ActivationMode
 from pmkb.domain.identity import format_reference_marker, new_identifier
 from pmkb.domain.rules import RuleViolation
+from pmkb.infrastructure.storage import writing
 from pmkb.infrastructure.storage.collection_catalog import LocalCollectionBackend
 from pmkb.infrastructure.storage.connection import StorageFailure, connect_reader
 from pmkb.infrastructure.storage.reader import capture_snapshot, metadata
@@ -181,12 +183,17 @@ class RestoreInitTests(unittest.TestCase):
                                     base_revision=None)
         self.assertIsNotNone(reuse.error)
 
+    def leftover_candidates(self) -> list[str]:
+        return sorted(path.name for path in self.root.iterdir() if ".pmkb-" in path.name)
+
     def test_existing_target_is_refused_and_invalid_input_leaves_no_file(self) -> None:
         existing = self.root / "existing.sqlite"
         existing.write_bytes(b"occupied")
         with self.assertRaises(StorageFailure) as error:
             initialize_restored_collection(existing, new_collection_id=new_identifier(), notes=())
         self.assertEqual(error.exception.code, "TARGET_EXISTS")
+        self.assertEqual(existing.read_bytes(), b"occupied")
+        self.assertEqual(self.leftover_candidates(), [])
 
         invalid_path = self.root / "invalid.sqlite"
         with self.assertRaises(RuleViolation):
@@ -195,6 +202,48 @@ class RestoreInitTests(unittest.TestCase):
                 notes=(RestoredNote(new_identifier(), " ", "body", ()),),
             )
         self.assertFalse(invalid_path.exists())
+        self.assertEqual(self.leftover_candidates(), [])
+
+    def test_competing_creator_winning_the_target_is_not_deleted(self) -> None:
+        # C-REV-01: the racer creates the target after our candidate exists and
+        # before publication. Its bytes must survive and our candidate is cleaned.
+        target_path = self.root / "restored.sqlite"
+        real_publish = writing._publish_candidate
+
+        def racing_publish(candidate, target):
+            target.write_bytes(b"other creator bytes")
+            return real_publish(candidate, target)
+
+        with mock.patch.object(writing, "_publish_candidate", racing_publish):
+            with self.assertRaises(StorageFailure) as error:
+                initialize_restored_collection(
+                    target_path, new_collection_id=new_identifier(),
+                    notes=(RestoredNote(new_identifier(), "N", "body", ()),),
+                )
+        self.assertEqual(error.exception.code, "TARGET_EXISTS")
+        self.assertEqual(target_path.read_bytes(), b"other creator bytes")
+        self.assertEqual(self.leftover_candidates(), [])
+
+    def test_replaced_candidate_is_not_deleted_on_failure(self) -> None:
+        # C-REV-01: cleanup must prove ownership through the file identity, not a
+        # path that somebody else may now own.
+        target_path = self.root / "restored.sqlite"
+        captured: dict[str, Path] = {}
+
+        def replace_then_fail(candidate, target):
+            captured["path"] = candidate
+            candidate.unlink()
+            candidate.write_bytes(b"intruder bytes")
+            raise StorageFailure("IO_FAILURE", "simulated publish failure")
+
+        with mock.patch.object(writing, "_publish_candidate", replace_then_fail):
+            with self.assertRaises(StorageFailure):
+                initialize_restored_collection(
+                    target_path, new_collection_id=new_identifier(),
+                    notes=(RestoredNote(new_identifier(), "N", "body", ()),),
+                )
+        self.assertFalse(target_path.exists())
+        self.assertEqual(captured["path"].read_bytes(), b"intruder bytes")
 
     def test_duplicate_note_identities_in_payload_are_rejected(self) -> None:
         note_id = new_identifier()

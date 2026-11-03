@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from threading import Event
 from typing import Callable, TypeVar
 
-from pmkb.application.parsing import ReferenceState, parse_markdown
+from pmkb.application.parsing import ReferenceState
 from pmkb.contracts.common import AppError, CallContext, OperationResult, ResultStatus
 from pmkb.domain.identity import require_identifier
 from pmkb.domain.rules import RuleViolation
@@ -158,25 +158,27 @@ class SavedQueryService:
         return _result(context, ResultStatus.OK, reply)
 
     def saved_view(self, request: SavedViewRequest) -> SavedNoteView:
-        """Synchronous core: saved note, saved references, saved-only backlinks."""
+        """Synchronous core: one consistent saved snapshot for the whole view.
+
+        Note body, tags, reference classification, backlinks and the collection
+        revision come from a single read transaction (C-REV-02), so the response
+        can never combine an older body with newer relations or a newer
+        collection revision.
+        """
         if not isinstance(request, SavedViewRequest):
             raise RuleViolation("INVALID_ARGUMENT", "Expected a saved view request.")
         self._check_context(request.context)
         require_identifier(request.request_id, "Request identity")
         require_identifier(request.note_id, "Note identity")
-        note = self._store.load_note(request.note_id)
-        if note is None:
+        data = self._store.saved_view(request.note_id)
+        if data is None:
             raise RuleViolation("NOTE_NOT_FOUND", "No saved note has this identity.")
-        document = parse_markdown(note.body, self._store.collection_id)
-        resolved = self._store.classify(document)
-        backlinks = self._store.backlinks(request.note_id)
-        metadata = self._store.metadata()
         return SavedNoteView(
-            note.note_id,
-            note.revision,
-            note.name,
-            note.body,
-            note.tags,
+            data.note_id,
+            data.revision,
+            data.name,
+            data.body,
+            data.tags,
             tuple(
                 ReferenceView(
                     item.occurrence.target_collection_id,
@@ -189,10 +191,11 @@ class SavedQueryService:
                     item.reason,
                     item.navigable,
                 )
-                for item in resolved
+                for item in data.references
             ),
-            tuple(BacklinkView(item.note_id, item.name, item.revision) for item in backlinks),
-            metadata.collection_revision,
+            tuple(BacklinkView(item.note_id, item.name, item.revision)
+                  for item in data.backlinks),
+            data.collection_revision,
         )
 
     async def load_saved_view(self, request: SavedViewRequest,

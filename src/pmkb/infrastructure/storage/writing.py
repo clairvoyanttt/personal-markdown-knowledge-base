@@ -17,9 +17,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import StrEnum
 from importlib.resources import files
+import os
 from pathlib import Path
 import secrets
 import sqlite3
+import stat
 
 from pmkb.application.parsing import ParsedDocument, parse_markdown
 from pmkb.contracts.common import AppError
@@ -558,16 +560,42 @@ def initialize_restored_collection(
 ) -> RestoreInitResult:
     """Create a brand-new collection database from an already converted snapshot.
 
-    The target file must not exist yet; the schema comes from the approved DDL.
+    Ownership boundary (C-REV-01): the database is built in a private candidate
+    file that this call creates exclusively in the target directory, then
+    published with an atomic same-directory hard link that never overwrites. A
+    target that already exists — before the call or created by a competing
+    creator while the candidate is built — is left byte-for-byte untouched.
+    Cleanup only removes the candidate while its file identity still matches the
+    one this call created, so a replaced path is never deleted; no bare
+    ``exists()`` check is used as proof of ownership.
+
     Every note starts at revision 1 with its own ``RESTORE_NOTE_INIT`` receipt,
     one collection-level ``RESTORE_INIT`` receipt exists, and the collection
     revision is 1. Reference ownership is re-derived from the converted body, so
     only markers actually present in the text become occurrences.
     """
     require_identifier(new_collection_id, "New collection identity")
-    path = Path(database)
-    if path.exists():
+    target = Path(database)
+    if target.exists() or target.is_symlink():
         raise StorageFailure("TARGET_EXISTS", "The restore target must not exist yet.")
+    if not target.parent.is_dir():
+        raise StorageFailure("INVALID_ARGUMENT", "The restore target directory must exist.")
+
+    candidate, identity = _create_candidate(target)
+    try:
+        _write_restored_candidate(candidate, new_collection_id, notes, retained)
+        _publish_candidate(candidate, target)
+    finally:
+        _discard_candidate(candidate, identity)
+    return RestoreInitResult(new_collection_id, 1, len(notes), len(retained))
+
+
+def _write_restored_candidate(
+    path: Path,
+    new_collection_id: str,
+    notes: tuple[RestoredNote, ...],
+    retained: tuple[RetainedIdentity, ...],
+) -> None:
     connection = None
     try:
         connection = sqlite3.connect(path, timeout=10.0, autocommit=True)
@@ -633,21 +661,18 @@ def initialize_restored_collection(
         if connection.execute("PRAGMA foreign_key_check").fetchall():
             raise StorageFailure("INVALID_ARGUMENT", "Restored relationships are inconsistent.")
         commit(connection)
-    except (RuleViolation, StorageFailure):
-        if connection is not None:
-            rollback(connection)
-            connection.close()
-            _unlink_quietly(path)
-        raise
     except sqlite3.Error as error:
         if connection is not None:
             rollback(connection)
-            connection.close()
-            _unlink_quietly(path)
         raise StorageFailure("IO_FAILURE", "The restored collection could not be initialized.") from error
-    if connection is not None:
-        connection.close()
-    return RestoreInitResult(new_collection_id, 1, len(notes), len(retained))
+    except BaseException:
+        # Explicit ROLLBACK before the connection closes; the caller then removes
+        # only the candidate it proved it owns.
+        if connection is not None:
+            rollback(connection)
+        raise
+    finally:
+        _close(connection)
 
 
 # ---------------------------------------------------------------------------
@@ -691,8 +716,62 @@ def _close(connection: sqlite3.Connection | None) -> None:
             pass
 
 
-def _unlink_quietly(path: Path) -> None:
+def _create_candidate(target: Path) -> tuple[Path, tuple[int, int]]:
+    """Exclusively create a private candidate file and record its file identity."""
+    for _attempt in range(4):
+        candidate = target.parent / f".{target.name}.pmkb-{secrets.token_hex(8)}.sqlite"
+        try:
+            descriptor = os.open(candidate, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        except FileExistsError:
+            continue
+        except OSError as error:
+            raise StorageFailure(
+                "IO_FAILURE", "A private restore candidate could not be created."
+            ) from error
+        os.close(descriptor)
+        identity = _candidate_identity(candidate)
+        if identity is not None:
+            return candidate, identity
+    raise StorageFailure("IO_FAILURE", "A private restore candidate could not be created.")
+
+
+def _candidate_identity(path: Path) -> tuple[int, int] | None:
+    """(device, inode) of a regular non-symlink candidate, else ``None``."""
+    try:
+        info = path.lstat()
+    except OSError:
+        return None
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+        return None
+    return (info.st_dev, info.st_ino)
+
+
+def _discard_candidate(path: Path, identity: tuple[int, int]) -> None:
+    """Remove the candidate only while it is still the file this call created."""
+    if _candidate_identity(path) != identity:
+        return
     try:
         path.unlink()
     except OSError:
         pass
+
+
+def _publish_candidate(candidate: Path, target: Path) -> None:
+    """Publish atomically with a same-directory hard link; never overwrite."""
+    try:
+        os.link(candidate, target)
+    except FileExistsError as error:
+        raise StorageFailure(
+            "TARGET_EXISTS", "The restore target already exists.",
+            "Choose an empty location; the existing file was not changed.",
+        ) from error
+    except OSError as error:
+        if target.exists() or target.is_symlink():
+            raise StorageFailure(
+                "TARGET_EXISTS", "The restore target already exists.",
+                "Choose an empty location; the existing file was not changed.",
+            ) from error
+        # A filesystem without hard links fails safely; no replacing fallback.
+        raise StorageFailure(
+            "IO_FAILURE", "The restored collection could not be published safely."
+        ) from error

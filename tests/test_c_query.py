@@ -3,8 +3,10 @@ from __future__ import annotations
 
 import asyncio
 import tempfile
+import threading
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from pmkb.application.parsing import ReferenceState, parse_markdown
 from pmkb.application.query.service import SavedQueryService, SavedViewRequest, SearchRequest
@@ -12,6 +14,7 @@ from pmkb.contracts.collections import ActivationMode
 from pmkb.contracts.common import CallContext, ResultStatus
 from pmkb.domain.identity import format_reference_marker, new_identifier
 from pmkb.domain.rules import RuleViolation
+from pmkb.infrastructure.storage import reader as reader_module
 from pmkb.infrastructure.storage.collection_catalog import LocalCollectionBackend
 from pmkb.infrastructure.storage.store import CollectionStore
 
@@ -236,6 +239,94 @@ class ReferenceTests(QueryTestCase):
                         note_id=note_id, name="Saved name", body="新正文 未保存关键词",
                         tags=(), base_revision=1)
         self.assertEqual(self.search("未保存关键词").total, 1)
+
+
+class SavedViewSnapshotTests(QueryTestCase):
+    def test_saved_view_uses_a_single_read_transaction(self) -> None:
+        # C-REV-02: body, relations, backlinks and the collection revision must be
+        # read in one transaction, not four independent ones.
+        target = new_identifier()
+        source = new_identifier()
+        self.save(note_id=target, name="Target")
+        marker = format_reference_marker(self.collection_id, target)
+        self.save(note_id=source, name="Source", body=f"看 {marker}")
+
+        opened: list = []
+        statements: list[str] = []
+        original = reader_module.connect_reader
+
+        def recording(database):
+            connection = original(database)
+            connection.set_trace_callback(statements.append)
+            opened.append(connection)
+            return connection
+
+        with mock.patch.object(reader_module, "connect_reader", recording):
+            view = self.service.saved_view(
+                SavedViewRequest(self.context, new_identifier(), source))
+
+        self.assertEqual(len(opened), 1, "the saved view opened more than one connection")
+        normalized = [statement.strip().upper() for statement in statements]
+        self.assertEqual(normalized.count("BEGIN"), 1)
+        self.assertEqual(normalized.count("COMMIT"), 1)
+        self.assertEqual(len(view.references), 1)
+        self.assertEqual(view.collection_revision, 3)
+
+    def test_saved_view_never_mixes_two_saved_moments(self) -> None:
+        # C-REV-02: a real save repeatedly interleaves with view construction. Each
+        # response must belong to one saved moment: reference count and body agree
+        # with the note revision, and the collection revision belongs to that same
+        # moment (only this note is written, so collection revision = revision + 2).
+        target = new_identifier()
+        source = new_identifier()
+        self.save(note_id=target, name="Target")
+        marker = format_reference_marker(self.collection_id, target)
+        with_reference = f"看 {marker}"
+        without_reference = "没有引用"
+        self.save(note_id=source, name="Source", body=with_reference)
+
+        stop = threading.Event()
+        errors: list[str] = []
+
+        def writer() -> None:
+            revision = 1
+            for _ in range(60):
+                if stop.is_set():
+                    return
+                revision += 1
+                body = with_reference if revision % 2 == 1 else without_reference
+                result = self.store.save(
+                    command_id=new_identifier(),
+                    operation_id=new_identifier(),
+                    note_id=source,
+                    name="Source",
+                    body=body,
+                    tags=(),
+                    base_revision=revision - 1,
+                )
+                if result.state.value != "COMMITTED":
+                    errors.append(f"writer save failed at revision {revision}: {result.error}")
+                    return
+
+        thread = threading.Thread(target=writer, daemon=True)
+        thread.start()
+        try:
+            for _ in range(120):
+                view = self.service.saved_view(
+                    SavedViewRequest(self.context, new_identifier(), source))
+                expected_references = 1 if view.revision % 2 == 1 else 0
+                with self.subTest(revision=view.revision):
+                    self.assertEqual(len(view.references), expected_references)
+                    self.assertEqual(
+                        view.body,
+                        with_reference if expected_references else without_reference,
+                    )
+                    self.assertEqual(view.collection_revision, view.revision + 2)
+        finally:
+            stop.set()
+            thread.join(timeout=15)
+        self.assertEqual(errors, [])
+        self.assertFalse(thread.is_alive(), "the writer thread did not stop")
 
 
 if __name__ == "__main__":

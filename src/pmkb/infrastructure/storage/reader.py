@@ -14,7 +14,12 @@ from pathlib import Path
 import sqlite3
 from typing import Iterator
 
-from pmkb.application.parsing import ParsedDocument, ReferenceState, ResolvedReference
+from pmkb.application.parsing import (
+    ParsedDocument,
+    ReferenceState,
+    ResolvedReference,
+    parse_markdown,
+)
 from pmkb.domain.naming import normalize_tag
 from pmkb.domain.rules import RuleViolation, require_text
 from pmkb.infrastructure.storage.connection import (
@@ -70,6 +75,25 @@ class BacklinkSource:
     note_id: str
     name: str
     revision: int
+
+
+@dataclass(frozen=True, slots=True)
+class SavedViewData:
+    """One saved note with its relations, all read from the same snapshot.
+
+    Body, tags, reference classification, backlinks and the collection revision
+    are produced inside a single read transaction, so the result always
+    corresponds to exactly one saved moment (C-REV-02).
+    """
+
+    note_id: str
+    revision: int
+    name: str
+    body: str
+    tags: tuple[str, ...]
+    references: tuple[ResolvedReference, ...]
+    backlinks: tuple[BacklinkSource, ...]
+    collection_revision: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -220,14 +244,19 @@ def search_notes(
 def list_backlinks(database: str | Path, collection_id: str, note_id: str) -> tuple[BacklinkSource, ...]:
     """Saved notes that reference ``note_id`` inside this collection, by saved name."""
     with _read_transaction(database, collection_id) as (reader, _metadata):
-        rows = reader.execute(
-            "SELECT DISTINCT n.noteId, n.name, n.revision FROM RefOccurrence r"
-            " JOIN Notes n ON n.noteId=r.sourceNoteId"
-            " WHERE r.targetCollectionId=? AND r.targetNoteId=?"
-            " ORDER BY lower(n.name), n.noteId",
-            (collection_id, note_id),
-        ).fetchall()
+        rows = _backlink_rows(reader, collection_id, note_id)
     return tuple(BacklinkSource(*row) for row in rows)
+
+
+def _backlink_rows(reader: sqlite3.Connection, collection_id: str,
+                   note_id: str) -> list[tuple]:
+    return reader.execute(
+        "SELECT DISTINCT n.noteId, n.name, n.revision FROM RefOccurrence r"
+        " JOIN Notes n ON n.noteId=r.sourceNoteId"
+        " WHERE r.targetCollectionId=? AND r.targetNoteId=?"
+        " ORDER BY lower(n.name), n.noteId",
+        (collection_id, note_id),
+    ).fetchall()
 
 
 def classify_references(
@@ -241,29 +270,72 @@ def classify_references(
     """
     if document.collection_id != collection_id:
         raise RuleViolation("INVALID_ARGUMENT", "The parse result belongs to another collection.")
-    resolved: list[ResolvedReference] = []
     with _read_transaction(database, collection_id) as (reader, _metadata):
-        for occurrence in document.references:
-            if occurrence.target_collection_id != collection_id:
-                resolved.append(ResolvedReference(
-                    occurrence, ReferenceState.FOREIGN_COLLECTION, None,
-                    REFERENCE_REASONS[ReferenceState.FOREIGN_COLLECTION]))
-                continue
-            row = reader.execute(
-                "SELECT k.state, k.lastSavedName, n.name FROM NoteKeys k"
-                " LEFT JOIN Notes n ON n.noteId=k.noteId WHERE k.noteId=?",
-                (occurrence.target_note_id,),
-            ).fetchone()
-            if row is None:
-                state, name = ReferenceState.MISSING, None
-            elif row[0] == "LIVE" and row[2] is not None:
-                state, name = ReferenceState.VALID, row[2]
-            elif row[0] == "DELETED":
-                state, name = ReferenceState.DELETED, row[1]
-            else:
-                state, name = ReferenceState.MISSING, row[1]
-            resolved.append(ResolvedReference(occurrence, state, name, REFERENCE_REASONS[state]))
+        resolved = _classify_with(reader, collection_id, document)
+    return resolved
+
+
+def _classify_with(reader: sqlite3.Connection, collection_id: str,
+                   document: ParsedDocument) -> tuple[ResolvedReference, ...]:
+    resolved: list[ResolvedReference] = []
+    for occurrence in document.references:
+        if occurrence.target_collection_id != collection_id:
+            resolved.append(ResolvedReference(
+                occurrence, ReferenceState.FOREIGN_COLLECTION, None,
+                REFERENCE_REASONS[ReferenceState.FOREIGN_COLLECTION]))
+            continue
+        row = reader.execute(
+            "SELECT k.state, k.lastSavedName, n.name FROM NoteKeys k"
+            " LEFT JOIN Notes n ON n.noteId=k.noteId WHERE k.noteId=?",
+            (occurrence.target_note_id,),
+        ).fetchone()
+        if row is None:
+            state, name = ReferenceState.MISSING, None
+        elif row[0] == "LIVE" and row[2] is not None:
+            state, name = ReferenceState.VALID, row[2]
+        elif row[0] == "DELETED":
+            state, name = ReferenceState.DELETED, row[1]
+        else:
+            state, name = ReferenceState.MISSING, row[1]
+        resolved.append(ResolvedReference(occurrence, state, name, REFERENCE_REASONS[state]))
     return tuple(resolved)
+
+
+def saved_view(database: str | Path, collection_id: str,
+               note_id: str) -> SavedViewData | None:
+    """Read one saved note and all of its relations from a single snapshot (C-REV-02).
+
+    Body, tags, reference classification, backlinks and the collection revision
+    are read inside one read transaction. A save/rename/delete that commits while
+    the view is being built can therefore appear either entirely before or
+    entirely after it, never as old body with new relations or a newer collection
+    revision attached to an older note revision.
+    """
+    with _read_transaction(database, collection_id) as (reader, metadata):
+        row = reader.execute(
+            "SELECT name, body, revision FROM Notes WHERE noteId=?", (note_id,)
+        ).fetchone()
+        if row is None:
+            return None
+        tags = tuple(
+            item[0] for item in reader.execute(
+                "SELECT tag FROM NoteTags WHERE noteId=? ORDER BY tag", (note_id,)
+            )
+        )
+        document = parse_markdown(row[1], collection_id)
+        references = _classify_with(reader, collection_id, document)
+        backlinks = _backlink_rows(reader, collection_id, note_id)
+        collection_revision = metadata.collection_revision
+    return SavedViewData(
+        note_id,
+        row[2],
+        row[0],
+        row[1],
+        tags,
+        references,
+        tuple(BacklinkSource(*item) for item in backlinks),
+        collection_revision,
+    )
 
 
 def capture_snapshot(database: str | Path) -> CollectionSnapshot:

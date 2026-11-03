@@ -95,11 +95,14 @@ class SqliteEditingStorage:
         if not isinstance(attempt, SaveAttempt):
             raise ValueError("Expected a save attempt.")
         if attempt.context.collection_id != self._store.collection_id:
+            # Another collection's adapter cannot prove that the original SAVE did
+            # not commit. Report unknown so B keeps its pending-save protection
+            # instead of being told the write was rolled back (C-REV-05).
             return self._evidence(attempt, CommitResult(
-                CommitState.NOT_COMMITTED, None, None, _error(
-                    "STALE_CONTEXT",
-                    "The save context no longer refers to the active collection.",
-                    "Reopen the collection before verifying.",
+                CommitState.UNRESOLVED, None, None, _error(
+                    "COMMIT_UNCONFIRMED",
+                    "This adapter belongs to another collection and cannot verify the original save.",
+                    "Verify the pending save through the collection it was written to.",
                 )))
         snapshot = attempt.snapshot
         result = await self._submit(lambda: self._store.check_save(
