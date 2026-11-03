@@ -70,14 +70,14 @@ def create_startup_window() -> StartupWindow:
     return window
 
 
-def create_main_window(config_file=None, storage=None, preview_renderer=None):
+def create_main_window(config_file=None, storage=None, preview_renderer=None, *, export_source=None):
     # Import after StartupWindow exists: the editor extends its resource lifecycle.
     import os
     from pathlib import Path
     from pmkb.desktop.editor import EditorWindow
     if config_file is None:
         config_file = Path(os.environ.get('LOCALAPPDATA', str(Path.home()))) / 'PersonalMarkdownKnowledgeBase' / 'collections.json'
-    return EditorWindow(Path(config_file), storage, preview_renderer)
+    return EditorWindow(Path(config_file), storage, preview_renderer, export_source=export_source)
 
 
 def main() -> int:
