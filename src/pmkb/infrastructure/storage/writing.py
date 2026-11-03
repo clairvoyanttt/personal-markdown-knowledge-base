@@ -551,6 +551,75 @@ class RestoreInitResult:
     retained_identities: int
 
 
+@dataclass(frozen=True, slots=True)
+class _ExpectedNote:
+    """The exact saved projection one restored note must produce."""
+
+    note_id: str
+    name: str
+    name_key: str
+    body: str
+    tags: tuple[str, ...]
+    references: tuple[tuple[int, str, str, int, int], ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _ExpectedCollection:
+    collection_id: str
+    notes: tuple[_ExpectedNote, ...]
+    retained: tuple[RetainedIdentity, ...]
+
+
+def _build_expected(
+    new_collection_id: str,
+    notes: tuple[RestoredNote, ...],
+    retained: tuple[RetainedIdentity, ...],
+) -> _ExpectedCollection:
+    """Validate the payload once and freeze the exact projection to verify later.
+
+    Writer and verifiers compare against this same source content instead of only
+    checking that the database is structurally valid, so replacing the saved body
+    with a different one of the same shape is detected (C-REV-07).
+    """
+    require_identifier(new_collection_id, "New collection identity")
+    expected_notes: list[_ExpectedNote] = []
+    for item in notes:
+        if not isinstance(item, RestoredNote):
+            raise RuleViolation("INVALID_ARGUMENT", "Expected restored note inputs.")
+        require_identifier(item.note_id, "Note identity")
+        normalized = normalize_name(item.name)
+        tags = normalize_tags(item.tags)
+        parsed = parse_markdown(item.body, new_collection_id)
+        expected_notes.append(_ExpectedNote(
+            note_id=item.note_id,
+            name=normalized.name,
+            name_key=normalized.key,
+            body=parsed.body,
+            tags=tags,
+            references=tuple(
+                (occurrence.ordinal, occurrence.target_collection_id,
+                 occurrence.target_note_id, occurrence.start_utf16, occurrence.length_utf16)
+                for occurrence in parsed.references
+            ),
+        ))
+    if len({note.note_id for note in expected_notes}) != len(expected_notes):
+        raise RuleViolation("INVALID_ARGUMENT", "Restored note identities must be unique.")
+    expected_retained: list[RetainedIdentity] = []
+    for entry in retained:
+        if not isinstance(entry, RetainedIdentity):
+            raise RuleViolation("INVALID_ARGUMENT", "Expected retained identity inputs.")
+        require_identifier(entry.note_id, "Retained note identity")
+        if entry.state not in {"DELETED", "MISSING_RESERVED"}:
+            raise RuleViolation("INVALID_ARGUMENT", "A retained identity must be deleted or reserved.")
+        expected_retained.append(entry)
+    live_ids = {note.note_id for note in expected_notes}
+    if any(entry.note_id in live_ids for entry in expected_retained):
+        raise RuleViolation(
+            "INVALID_ARGUMENT", "A retained identity cannot also be restored as a live note.",
+        )
+    return _ExpectedCollection(new_collection_id, tuple(expected_notes), tuple(expected_retained))
+
+
 def initialize_restored_collection(
     database: str | Path,
     *,
@@ -581,13 +650,14 @@ def initialize_restored_collection(
     if not target.parent.is_dir():
         raise StorageFailure("INVALID_ARGUMENT", "The restore target directory must exist.")
 
+    expected = _build_expected(new_collection_id, notes, retained)
     candidate, identity = _create_candidate(target)
     try:
-        _write_restored_candidate(candidate, identity, new_collection_id, notes, retained)
-        _publish_candidate(candidate, identity, target, new_collection_id, notes, retained)
+        _write_restored_candidate(candidate, identity, expected)
+        _publish_candidate(candidate, identity, target, expected)
     finally:
         _discard_candidate(candidate, identity)
-    return RestoreInitResult(new_collection_id, 1, len(notes), len(retained))
+    return RestoreInitResult(new_collection_id, 1, len(expected.notes), len(expected.retained))
 
 
 def _open_owned_candidate(path: Path, identity: tuple[int, int]) -> sqlite3.Connection:
@@ -620,9 +690,7 @@ def _open_owned_candidate(path: Path, identity: tuple[int, int]) -> sqlite3.Conn
 def _write_restored_candidate(
     path: Path,
     identity: tuple[int, int],
-    new_collection_id: str,
-    notes: tuple[RestoredNote, ...],
-    retained: tuple[RetainedIdentity, ...],
+    expected: _ExpectedCollection,
 ) -> None:
     connection = None
     try:
@@ -635,55 +703,44 @@ def _write_restored_candidate(
         connection.execute(
             "INSERT INTO CollectionMeta(singletonId,collectionId,schemaVersion,"
             "collectionRevision,state) VALUES (1,?,1,1,'READY')",
-            (new_collection_id,),
+            (expected.collection_id,),
         )
         connection.execute(
             "INSERT INTO CommitReceipt(commandId,operationId,collectionId,operationKind,noteId,"
             "beforeRevision,afterRevision,collectionRevision) VALUES (?,?,?,'RESTORE_INIT',"
             "NULL,NULL,NULL,1)",
-            (secrets.token_hex(16), secrets.token_hex(16), new_collection_id),
+            (secrets.token_hex(16), secrets.token_hex(16), expected.collection_id),
         )
-        for entry in retained:
-            require_identifier(entry.note_id, "Retained note identity")
-            if entry.state not in {"DELETED", "MISSING_RESERVED"}:
-                raise RuleViolation("INVALID_ARGUMENT", "A retained identity must be deleted or reserved.")
+        for entry in expected.retained:
             connection.execute(
                 "INSERT INTO NoteKeys(noteId,state,liveNoteId,lastSavedName) VALUES (?,?,NULL,?)",
                 (entry.note_id, entry.state, entry.last_saved_name),
             )
-        for item in notes:
-            require_identifier(item.note_id, "Note identity")
-            normalized = normalize_name(item.name)
-            tags = normalize_tags(item.tags)
-            parsed = parse_markdown(item.body, new_collection_id)
+        for note in expected.notes:
             receipt_id = secrets.token_hex(16)
             connection.execute(
                 "INSERT INTO NoteKeys(noteId,state,liveNoteId,lastSavedName) VALUES (?,?,?,?)",
-                (item.note_id, "LIVE", item.note_id, normalized.name),
+                (note.note_id, "LIVE", note.note_id, note.name),
             )
             connection.execute(
                 "INSERT INTO Notes(noteId,keyState,name,nameKey,body,revision,lastCommitId)"
                 " VALUES (?,?,?,?,?,1,?)",
-                (item.note_id, "LIVE", normalized.name, normalized.key, parsed.body, receipt_id),
+                (note.note_id, "LIVE", note.name, note.name_key, note.body, receipt_id),
             )
             connection.executemany(
                 "INSERT INTO NoteTags(noteId,tag) VALUES (?,?)",
-                [(item.note_id, tag) for tag in tags],
+                [(note.note_id, tag) for tag in note.tags],
             )
             connection.executemany(
                 "INSERT INTO RefOccurrence(sourceNoteId,sourceRevision,ordinal,targetCollectionId,"
                 " targetNoteId,startUtf16,lengthUtf16,displayHint) VALUES (?,1,?,?,?,?,?,NULL)",
-                [
-                    (item.note_id, occurrence.ordinal, occurrence.target_collection_id,
-                     occurrence.target_note_id, occurrence.start_utf16, occurrence.length_utf16)
-                    for occurrence in parsed.references
-                ],
+                [(note.note_id, *reference) for reference in note.references],
             )
             connection.execute(
                 "INSERT INTO CommitReceipt(commandId,operationId,collectionId,operationKind,"
                 "noteId,beforeRevision,afterRevision,collectionRevision)"
                 " VALUES (?,?,?,'RESTORE_NOTE_INIT',?,NULL,1,1)",
-                (receipt_id, secrets.token_hex(16), new_collection_id, item.note_id),
+                (receipt_id, secrets.token_hex(16), expected.collection_id, note.note_id),
             )
         integrity_check(connection)
         if connection.execute("PRAGMA foreign_key_check").fetchall():
@@ -702,7 +759,7 @@ def _write_restored_candidate(
     finally:
         _close(connection)
     # Content validity is proven before the file can be published.
-    _verify_candidate(path, identity, new_collection_id, notes, retained)
+    _verify_candidate(path, identity, expected)
 
 
 # ---------------------------------------------------------------------------
@@ -789,16 +846,15 @@ def _discard_candidate(path: Path, identity: tuple[int, int]) -> None:
 def _verify_candidate(
     path: Path,
     identity: tuple[int, int],
-    new_collection_id: str,
-    notes: tuple[RestoredNote, ...],
-    retained: tuple[RetainedIdentity, ...],
+    expected: _ExpectedCollection,
 ) -> None:
-    """Prove the file at ``path`` is still ours *and* a valid restored collection.
+    """Prove ownership, structure *and* equality with the source payload.
 
-    Identity alone cannot detect an in-place overwrite (same inode), so the
-    actual schema, metadata, row counts, initialization receipts and integrity are
-    re-read through a read-only connection before the file may be published
-    (C-REV-01 follow-up).
+    Identity alone cannot detect an in-place overwrite (same inode), and a
+    structurally valid database is not proof that the right content was written.
+    Every note is therefore compared against the frozen projection: identity,
+    saved name/key, body, revision, tag set, reference projection and ledger row;
+    retained identities, receipts and integrity are checked as well (C-REV-07).
     """
     if _candidate_identity(path) != identity:
         raise StorageFailure(
@@ -815,25 +871,67 @@ def _verify_candidate(
         metadata = reader.execute(
             "SELECT collectionId, schemaVersion, collectionRevision, state FROM CollectionMeta"
         ).fetchall()
-        note_rows = reader.execute("SELECT COUNT(*) FROM Notes").fetchone()[0]
+        if metadata != [(expected.collection_id, 1, 1, "READY")]:
+            raise StorageFailure(
+                "INVALID_ARGUMENT", "The restored collection metadata is not the expected new collection.",
+            )
+        rows = reader.execute("SELECT noteId, name, nameKey, body, revision FROM Notes").fetchall()
+        if len(rows) != len(expected.notes):
+            raise StorageFailure("INVALID_ARGUMENT", "Restored note rows do not match the payload.")
+        by_id = {row[0]: row for row in rows}
+        if len(by_id) != len(rows):
+            raise StorageFailure("INVALID_ARGUMENT", "Restored note identities are duplicated.")
+        for note in expected.notes:
+            row = by_id.get(note.note_id)
+            if row is None:
+                raise StorageFailure("INVALID_ARGUMENT", "A restored note from the payload is missing.")
+            if row[1] != note.name or row[2] != note.name_key or row[4] != 1:
+                raise StorageFailure(
+                    "INVALID_ARGUMENT", "A restored note name or revision differs from the payload.",
+                )
+            if row[3] != note.body:
+                raise StorageFailure("INVALID_ARGUMENT", "A restored note body differs from the payload.")
+            tags = tuple(sorted(
+                item[0] for item in reader.execute(
+                    "SELECT tag FROM NoteTags WHERE noteId=?", (note.note_id,)
+                )
+            ))
+            if tags != tuple(sorted(note.tags)):
+                raise StorageFailure("INVALID_ARGUMENT", "Restored tags differ from the payload.")
+            references = tuple(reader.execute(
+                "SELECT ordinal, targetCollectionId, targetNoteId, startUtf16, lengthUtf16"
+                " FROM RefOccurrence WHERE sourceNoteId=? ORDER BY ordinal", (note.note_id,)
+            ).fetchall())
+            if references != note.references:
+                raise StorageFailure(
+                    "INVALID_ARGUMENT", "Restored reference projection differs from the payload.",
+                )
+            ledger = reader.execute(
+                "SELECT state, liveNoteId, lastSavedName FROM NoteKeys WHERE noteId=?", (note.note_id,)
+            ).fetchone()
+            if ledger != ("LIVE", note.note_id, note.name):
+                raise StorageFailure("INVALID_ARGUMENT", "A restored note identity ledger is wrong.")
         key_rows = reader.execute("SELECT COUNT(*) FROM NoteKeys").fetchone()[0]
+        if key_rows != len(expected.notes) + len(expected.retained):
+            raise StorageFailure("INVALID_ARGUMENT", "Restored identity rows do not match the payload.")
+        for entry in expected.retained:
+            ledger = reader.execute(
+                "SELECT state, liveNoteId, lastSavedName FROM NoteKeys WHERE noteId=?", (entry.note_id,)
+            ).fetchone()
+            if ledger != (entry.state, None, entry.last_saved_name):
+                raise StorageFailure("INVALID_ARGUMENT", "A retained identity differs from the payload.")
         kinds = dict(reader.execute(
             "SELECT operationKind, COUNT(*) FROM CommitReceipt GROUP BY operationKind"
         ).fetchall())
+        expected_kinds = {"RESTORE_INIT": 1}
+        if expected.notes:
+            expected_kinds["RESTORE_NOTE_INIT"] = len(expected.notes)
         initialized = reader.execute(
             "SELECT COUNT(*) FROM Notes n JOIN CommitReceipt r ON r.commandId=n.lastCommitId"
             " WHERE n.revision=1 AND r.operationKind='RESTORE_NOTE_INIT'"
         ).fetchone()[0]
-        expected_kinds = {"RESTORE_INIT": 1}
-        if notes:
-            expected_kinds["RESTORE_NOTE_INIT"] = len(notes)
-        if metadata != [(new_collection_id, 1, 1, "READY")]:
-            raise StorageFailure(
-                "INVALID_ARGUMENT", "The restored collection metadata is not the expected new collection.",
-            )
-        if (note_rows != len(notes) or key_rows != len(notes) + len(retained)
-                or kinds != expected_kinds or initialized != len(notes)):
-            raise StorageFailure("INVALID_ARGUMENT", "Restored rows or receipts are incomplete.")
+        if kinds != expected_kinds or initialized != len(expected.notes):
+            raise StorageFailure("INVALID_ARGUMENT", "Restored receipts are incomplete.")
         if reader.execute("PRAGMA quick_check").fetchall() != [("ok",)]:
             raise StorageFailure("INVALID_ARGUMENT", "The restored collection failed its integrity check.")
         if reader.execute("PRAGMA foreign_key_check").fetchall():
@@ -849,14 +947,18 @@ def _publish_candidate(
     candidate: Path,
     identity: tuple[int, int],
     target: Path,
-    new_collection_id: str,
-    notes: tuple[RestoredNote, ...],
-    retained: tuple[RetainedIdentity, ...],
+    expected: _ExpectedCollection,
 ) -> None:
-    """Verify, publish atomically, then prove the published target is our file."""
+    """Verify, publish atomically, then prove the published target is our file.
+
+    An identity mismatch after the link proves this call cannot show ownership of
+    the name anymore, so the file is never deleted: everything is left untouched
+    and the result is reported as unknown (C-REV-01 follow-up). The same applies
+    when the published content cannot be re-proven.
+    """
     # A candidate overwritten in place keeps its inode, so content validity is
     # re-proven immediately before the link is created.
-    _verify_candidate(candidate, identity, new_collection_id, notes, retained)
+    _verify_candidate(candidate, identity, expected)
     try:
         os.link(candidate, target)
     except FileExistsError as error:
@@ -875,19 +977,18 @@ def _publish_candidate(
             "IO_FAILURE", "The restored collection could not be published safely."
         ) from error
     if _candidate_identity(target) != identity:
-        # The name we created does not point at the verified inode. Remove only
-        # that name (the other file keeps its own name) and never report success.
-        try:
-            target.unlink()
-        except OSError:
-            pass
         raise StorageFailure(
-            "IO_FAILURE", "The published restore target could not be confirmed.",
+            "IO_FAILURE",
+            "The published restore target was replaced by another creator; it was left untouched.",
             "Inspect the target location; do not treat this restore as complete.",
             unknown=True,
         )
     try:
-        _verify_candidate(target, identity, new_collection_id, notes, retained)
-    except StorageFailure:
-        _discard_candidate(target, identity)
-        raise
+        _verify_candidate(target, identity, expected)
+    except StorageFailure as error:
+        raise StorageFailure(
+            "IO_FAILURE",
+            "The published restore target could not be verified; it was left for inspection.",
+            "Inspect the target location; do not treat this restore as complete.",
+            unknown=True,
+        ) from error

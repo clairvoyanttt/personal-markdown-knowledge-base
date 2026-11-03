@@ -4,6 +4,7 @@ from __future__ import annotations
 from contextlib import closing
 from datetime import timezone
 import os
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -211,9 +212,9 @@ class RestoreInitTests(unittest.TestCase):
         target_path = self.root / "restored.sqlite"
         real_publish = writing._publish_candidate
 
-        def racing_publish(candidate, identity, target, collection_id, notes, retained):
+        def racing_publish(candidate, identity, target, expected):
             target.write_bytes(b"other creator bytes")
-            return real_publish(candidate, identity, target, collection_id, notes, retained)
+            return real_publish(candidate, identity, target, expected)
 
         with mock.patch.object(writing, "_publish_candidate", racing_publish):
             with self.assertRaises(StorageFailure) as error:
@@ -231,7 +232,7 @@ class RestoreInitTests(unittest.TestCase):
         target_path = self.root / "restored.sqlite"
         captured: dict[str, Path] = {}
 
-        def replace_then_fail(candidate, identity, target, collection_id, notes, retained):
+        def replace_then_fail(candidate, identity, target, expected):
             captured["path"] = candidate
             candidate.unlink()
             candidate.write_bytes(b"intruder bytes")
@@ -254,11 +255,11 @@ class RestoreInitTests(unittest.TestCase):
         captured: dict[str, Path] = {}
         real_write = writing._write_restored_candidate
 
-        def replace_then_write(candidate, identity, collection_id, notes, retained):
+        def replace_then_write(candidate, identity, expected):
             captured["path"] = candidate
             candidate.unlink()
             candidate.write_bytes(b"other creator empty file")
-            return real_write(candidate, identity, collection_id, notes, retained)
+            return real_write(candidate, identity, expected)
 
         with mock.patch.object(writing, "_write_restored_candidate", replace_then_write):
             with self.assertRaises(StorageFailure) as error:
@@ -276,9 +277,9 @@ class RestoreInitTests(unittest.TestCase):
         target_path = self.root / "restored.sqlite"
         real_publish = writing._publish_candidate
 
-        def overwrite_then_publish(candidate, identity, target, collection_id, notes, retained):
+        def overwrite_then_publish(candidate, identity, target, expected):
             candidate.write_bytes(b"plain synthetic text, not a database")
-            return real_publish(candidate, identity, target, collection_id, notes, retained)
+            return real_publish(candidate, identity, target, expected)
 
         with mock.patch.object(writing, "_publish_candidate", overwrite_then_publish):
             with self.assertRaises(StorageFailure):
@@ -289,9 +290,9 @@ class RestoreInitTests(unittest.TestCase):
         self.assertFalse(target_path.exists())
         self.assertEqual(self.leftover_candidates(), [])
 
-    def test_replacement_between_verification_and_link_is_not_published(self) -> None:
-        # C-REV-01 follow-up: if the candidate is swapped after the pre-link
-        # verification, the created name must not be reported as a valid target.
+    def test_replacement_between_verification_and_link_is_not_reported(self) -> None:
+        # C-REV-01 follow-up: a candidate swapped after the pre-link verification
+        # must not be reported as a valid target, and nothing may be deleted.
         target_path = self.root / "restored.sqlite"
         real_link = os.link
 
@@ -308,12 +309,97 @@ class RestoreInitTests(unittest.TestCase):
                     notes=(RestoredNote(new_identifier(), "N", "body", ()),),
                 )
         self.assertTrue(error.exception.unknown)
-        self.assertFalse(target_path.exists())
+        self.assertEqual(target_path.read_bytes(), b"replacement between check and link")
+
+    def test_target_replaced_after_publish_is_not_deleted(self) -> None:
+        # C-REV-01 follow-up: a competitor replacing the target right after our
+        # link must keep its file; identity mismatch is not permission to delete.
+        target_path = self.root / "restored.sqlite"
+        real_link = os.link
+
+        def link_then_swap(source, destination, **kwargs):
+            result = real_link(source, destination, **kwargs)
+            Path(destination).unlink()
+            Path(destination).write_bytes(b"competitor replaced the target")
+            return result
+
+        with mock.patch.object(writing.os, "link", link_then_swap):
+            with self.assertRaises(StorageFailure) as error:
+                initialize_restored_collection(
+                    target_path, new_collection_id=new_identifier(),
+                    notes=(RestoredNote(new_identifier(), "N", "body", ()),),
+                )
+        self.assertTrue(error.exception.unknown)
+        self.assertEqual(target_path.read_bytes(), b"competitor replaced the target")
+
+    def test_content_substitution_with_identical_structure_is_rejected(self) -> None:
+        # C-REV-07: a structurally valid database is not proof of the right content.
+        real_publish = writing._publish_candidate
+        note_id = new_identifier()
+
+        def mutating_publish(mutation):
+            def run(candidate, identity, target, expected):
+                connection = sqlite3.connect(candidate, autocommit=True)
+                try:
+                    connection.execute("BEGIN IMMEDIATE")
+                    mutation(connection, note_id)
+                    connection.execute("COMMIT")
+                finally:
+                    connection.close()
+                return real_publish(candidate, identity, target, expected)
+            return run
+
+        mutations = {
+            "body": lambda connection, nid: connection.execute(
+                "UPDATE Notes SET body='substituted body' WHERE noteId=?", (nid,)),
+            "name": lambda connection, nid: connection.execute(
+                "UPDATE Notes SET name='改名', nameKey='改名' WHERE noteId=?", (nid,)),
+            "tag": lambda connection, nid: connection.execute(
+                "INSERT INTO NoteTags(noteId,tag) VALUES (?,'extra')", (nid,)),
+        }
+        for label, mutation in mutations.items():
+            with self.subTest(mutation=label):
+                path = self.root / f"restored-{label}.sqlite"
+                with mock.patch.object(writing, "_publish_candidate", mutating_publish(mutation)):
+                    with self.assertRaises(StorageFailure):
+                        initialize_restored_collection(
+                            path, new_collection_id=new_identifier(),
+                            notes=(RestoredNote(note_id, "N", "original body", ()),),
+                        )
+                self.assertFalse(path.exists())
+
+    def test_reference_projection_substitution_is_rejected(self) -> None:
+        # C-REV-07: the stored reference projection must match the parsed body.
+        marker = format_reference_marker("c" * 32, new_identifier())
+        real_publish = writing._publish_candidate
+        note_id = new_identifier()
+
+        def mutate_reference(candidate, identity, target, expected):
+            connection = sqlite3.connect(candidate, autocommit=True)
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                connection.execute(
+                    "UPDATE RefOccurrence SET startUtf16 = startUtf16 + 1 WHERE sourceNoteId=?",
+                    (note_id,),
+                )
+                connection.execute("COMMIT")
+            finally:
+                connection.close()
+            return real_publish(candidate, identity, target, expected)
+
+        path = self.root / "restored-reference.sqlite"
+        with mock.patch.object(writing, "_publish_candidate", mutate_reference):
+            with self.assertRaises(StorageFailure):
+                initialize_restored_collection(
+                    path, new_collection_id=new_identifier(),
+                    notes=(RestoredNote(note_id, "N", f"前缀 {marker}", ()),),
+                )
+        self.assertFalse(path.exists())
 
     def test_duplicate_note_identities_in_payload_are_rejected(self) -> None:
         note_id = new_identifier()
         path = self.root / "duplicate.sqlite"
-        with self.assertRaises(StorageFailure):
+        with self.assertRaises(RuleViolation):
             initialize_restored_collection(
                 path, new_collection_id=new_identifier(),
                 notes=(RestoredNote(note_id, "A", "body", ()),
