@@ -77,16 +77,16 @@ API04/05 的 `SearchRequest`/`SearchReply`/`SavedViewRequest`/`SavedNoteView` �
 | `tests/test_c_parsing.py` | 20 | 代码/外链/图片/转义/引用定义保护、撇号与引号、`)` 前空白、完整跨度切片、完整标记、外来归属、UTF-16（😀/CRLF）、六类块、坏输入 |
 | `tests/test_c_storage.py` | 19 | 新保存/二次保存/base 冲突、判重、重复命令、外键、触发器、指纹注入回滚、引用替换、删除级联、回执复读、`UNRESOLVED` |
 | `tests/test_c_query.py` | 19 | 连续字面匹配、ASCII 大小写、空/空白查询、无结果、标签 AND/区分大小写、集合隔离、改名保持关系、反向引用、删除不复活、外来/缺失、视图单事务与交错一致性、`)` 前空白真实保存 |
-| `tests/test_c_snapshot.py` | 14 | 快照一致性与身份账本、恢复初始化（READY/修订 1/初始化回执/引用重建）、保留已删除身份、目标所有权、竞争创建、候选在创建后/初始化后/发布前被替换、发布后目标被替换、内容与引用投影替换 |
+| `tests/test_c_snapshot.py` | 15 | 快照一致性与身份账本、恢复初始化（READY/修订 1/初始化回执/引用重建）、保留已删除身份、目标所有权、竞争创建、候选在创建后/初始化后/发布前被替换、发布后目标被替换、内容与引用投影替换、回执与 displayHint 篡改 |
 | `tests/test_c_editing_adapter.py` | 12 | 与 B 真实服务联调、草稿不入检索、判重不写入、上下文过期、取消不写入、并发保存串行、无回执不判回滚、跨集合核实保持未知 |
 
-合计 **101 项 C 用例**（一次性运行 `Ran 101 tests ... OK`）。首次运行时发现并修正的问题：
+合计 **102 项 C 用例**（一次性运行 `Ran 102 tests ... OK`）。首次运行时发现并修正的问题：
 测试用 `with sqlite3.Connection` 不关闭句柄导致 Windows 临时目录占用（改为 `closing`）；
 B 的草稿在首存前 `note_id` 为 `None`，证据断言改用 `SaveReply.note_id`。
 这些是测试/接线错误，不是业务规则放宽。
 
-全仓回归：`.venv\Scripts\python.exe scripts/check.py` 实际 **576 项发现、574 通过、2 项因
-Windows 符号链接权限跳过（exit code 0）**，其中 C 共 101 项；语法、公共契约导入与 `pip check` 均通过。
+全仓回归：`.venv\Scripts\python.exe scripts/check.py` 实际 **579 项发现、577 通过、2 项因
+Windows 符号链接权限跳过（exit code 0）**，其中 C 共 102 项；语法、公共契约导入与 `pip check` 均通过。
 （2 项跳过属于 D 的符号链接用例，不计为本批通过。）
 
 ### 4.1 NFR03 规模的 C 侧单机记录
@@ -232,3 +232,24 @@ C-REV-07（验证未比对期望内容）。两项均在原分支追加修复。
 
 本轮返修后实际检查：C 用例 **101 项全部通过**；全仓 `scripts/check.py` **576 项发现、574 通过、
 2 项符号链接权限跳过，exit code 0**。仍未合并，未执行产品验收。
+
+### 8.3 第四轮复审非阻断项跟进（2026-11-03）
+
+第四轮复审结论：C-REV-01 续与 C-REV-07 经真实文件/发布路径复核**通过**，PR #13 按既有授权合并
+（main `d940919`）。复审仅留一条非阻断建议：发布前的原位改写探针仍可漏过 `CommitReceipt.noteId` /
+`collectionId` 的对应关系与 `RefOccurrence.displayHint`。
+
+本批在从 main 新建的 `fix/c-r4-receipt-projection` 上补齐（不改动已合并历史）：
+
+- `_verify_candidate()` 增加回执台账校验：恰好 1 条 `RESTORE_INIT`（`collectionId`=新集合，
+  `noteId`/`beforeRevision`/`afterRevision` 均为 NULL，`collectionRevision`=1）；`RESTORE_NOTE_INIT`
+  数量与 notes 一致，每条 `collectionId`=新集合、`noteId` 属于本批、`beforeRevision` NULL、
+  `afterRevision`=1、`collectionRevision`=1；每篇 `Notes.lastCommitId` 必须指向**该篇自己的**
+  `RESTORE_NOTE_INIT` 回执。
+- `_verify_candidate()` 增加 `RefOccurrence.displayHint` 必须为 NULL 的校验（写入时固定 NULL）。
+- 回归 `test_receipt_and_display_hint_tampering_is_rejected`：在真实发布前对候选原位改写
+  `RESTORE_NOTE_INIT.collectionId`、`RESTORE_NOTE_INIT.noteId`、`RESTORE_INIT.collectionId`、
+  `RefOccurrence.displayHint` 四种字段，全部被拒绝、目标不出现、不返回成功。
+
+本轮实际检查：C 用例 **102 项全部通过**；全仓 `scripts/check.py` **579 项发现、577 通过、
+2 项符号链接权限跳过，exit code 0**。仍未执行产品验收。

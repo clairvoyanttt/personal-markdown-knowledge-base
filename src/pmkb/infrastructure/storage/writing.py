@@ -906,6 +906,13 @@ def _verify_candidate(
                 raise StorageFailure(
                     "INVALID_ARGUMENT", "Restored reference projection differs from the payload.",
                 )
+            hints = reader.execute(
+                "SELECT displayHint FROM RefOccurrence WHERE sourceNoteId=?", (note.note_id,)
+            ).fetchall()
+            if any(row[0] is not None for row in hints):
+                raise StorageFailure(
+                    "INVALID_ARGUMENT", "Restored reference display hints differ from the payload.",
+                )
             ledger = reader.execute(
                 "SELECT state, liveNoteId, lastSavedName FROM NoteKeys WHERE noteId=?", (note.note_id,)
             ).fetchone()
@@ -926,12 +933,39 @@ def _verify_candidate(
         expected_kinds = {"RESTORE_INIT": 1}
         if expected.notes:
             expected_kinds["RESTORE_NOTE_INIT"] = len(expected.notes)
-        initialized = reader.execute(
-            "SELECT COUNT(*) FROM Notes n JOIN CommitReceipt r ON r.commandId=n.lastCommitId"
-            " WHERE n.revision=1 AND r.operationKind='RESTORE_NOTE_INIT'"
-        ).fetchone()[0]
-        if kinds != expected_kinds or initialized != len(expected.notes):
+        if kinds != expected_kinds:
             raise StorageFailure("INVALID_ARGUMENT", "Restored receipts are incomplete.")
+        receipts = reader.execute(
+            "SELECT operationKind, collectionId, noteId, beforeRevision, afterRevision,"
+            " collectionRevision FROM CommitReceipt"
+        ).fetchall()
+        init_receipts = [row for row in receipts if row[0] == "RESTORE_INIT"]
+        if (len(init_receipts) != 1 or init_receipts[0][1] != expected.collection_id
+                or init_receipts[0][2] is not None or init_receipts[0][3] is not None
+                or init_receipts[0][4] is not None or init_receipts[0][5] != 1):
+            raise StorageFailure("INVALID_ARGUMENT", "The collection initialization receipt is wrong.")
+        expected_ids = {note.note_id for note in expected.notes}
+        note_receipts = [row for row in receipts if row[0] == "RESTORE_NOTE_INIT"]
+        if len(note_receipts) != len(expected.notes):
+            raise StorageFailure("INVALID_ARGUMENT", "Restored note receipts do not match the payload.")
+        for row in note_receipts:
+            if (row[1] != expected.collection_id or row[2] not in expected_ids
+                    or row[3] is not None or row[4] != 1 or row[5] != 1):
+                raise StorageFailure(
+                    "INVALID_ARGUMENT", "A restored note receipt does not match the payload.",
+                )
+        per_note = reader.execute(
+            "SELECT n.noteId, r.operationKind, r.collectionId, r.noteId"
+            " FROM Notes n JOIN CommitReceipt r ON r.commandId=n.lastCommitId"
+        ).fetchall()
+        if len(per_note) != len(expected.notes):
+            raise StorageFailure("INVALID_ARGUMENT", "A restored note has no matching initialization receipt.")
+        for note_id, kind, collection_id, receipt_note_id in per_note:
+            if (kind != "RESTORE_NOTE_INIT" or collection_id != expected.collection_id
+                    or receipt_note_id != note_id):
+                raise StorageFailure(
+                    "INVALID_ARGUMENT", "A restored note points at the wrong initialization receipt.",
+                )
         if reader.execute("PRAGMA quick_check").fetchall() != [("ok",)]:
             raise StorageFailure("INVALID_ARGUMENT", "The restored collection failed its integrity check.")
         if reader.execute("PRAGMA foreign_key_check").fetchall():
