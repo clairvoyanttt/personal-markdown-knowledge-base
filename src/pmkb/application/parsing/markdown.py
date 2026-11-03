@@ -321,6 +321,10 @@ def _destination_end(text: str, cursor: int, end: int) -> int | None:
     cursor = _skip_blank(text, cursor, end)
     if cursor >= end:
         return None
+    # A destination followed only by blanks before ``)`` is a valid link/image
+    # without a title (C-REV-06); only reject when another token follows.
+    if text[cursor] == ")":
+        return cursor + 1
     if text[cursor] in "\"'":
         cursor = _quoted_end(text, cursor, end)
     elif text[cursor] == "(":

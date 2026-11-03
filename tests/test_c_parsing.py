@@ -156,6 +156,28 @@ class SpanAndBlockTests(unittest.TestCase):
                     expected,
                 )
 
+    def test_blank_before_the_closing_paren_keeps_the_link_protected(self) -> None:
+        # C-REV-06: ``(https://example.com )`` and ``(image.png\\n)`` are valid
+        # links/images without a title, so their label must stay protected.
+        cases = (
+            (f"[label {MARKER}](https://example.com )", f"[label {MARKER}](https://example.com )"),
+            (f"![label {MARKER}](image.png )", f"![label {MARKER}](image.png )"),
+            (f"[label {MARKER}](https://example.com\n)", f"[label {MARKER}](https://example.com\n)"),
+            ('[x](https://example.com "title")', '[x](https://example.com "title")'),
+            ('[x](https://example.com  "title" )', '[x](https://example.com  "title" )'),
+        )
+        for body, expected in cases:
+            with self.subTest(body=body):
+                document = parse_markdown(body, COLLECTION)
+                spans = [span for span in document.protected_spans
+                         if span.kind in {ProtectedKind.LINK, ProtectedKind.IMAGE}]
+                self.assertEqual(len(spans), 1)
+                self.assertEqual(
+                    document.slice_span(spans[0].start_utf16, spans[0].length_utf16),
+                    expected,
+                )
+                self.assertEqual(document.references, ())
+
     def test_utf16_offsets_shift_after_astral_characters(self) -> None:
         body = "😀😀" + MARKER
         document = parse_markdown(body, COLLECTION)

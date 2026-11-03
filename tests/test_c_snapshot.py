@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from contextlib import closing
 from datetime import timezone
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -210,9 +211,9 @@ class RestoreInitTests(unittest.TestCase):
         target_path = self.root / "restored.sqlite"
         real_publish = writing._publish_candidate
 
-        def racing_publish(candidate, target):
+        def racing_publish(candidate, identity, target, collection_id, notes, retained):
             target.write_bytes(b"other creator bytes")
-            return real_publish(candidate, target)
+            return real_publish(candidate, identity, target, collection_id, notes, retained)
 
         with mock.patch.object(writing, "_publish_candidate", racing_publish):
             with self.assertRaises(StorageFailure) as error:
@@ -230,7 +231,7 @@ class RestoreInitTests(unittest.TestCase):
         target_path = self.root / "restored.sqlite"
         captured: dict[str, Path] = {}
 
-        def replace_then_fail(candidate, target):
+        def replace_then_fail(candidate, identity, target, collection_id, notes, retained):
             captured["path"] = candidate
             candidate.unlink()
             candidate.write_bytes(b"intruder bytes")
@@ -244,6 +245,70 @@ class RestoreInitTests(unittest.TestCase):
                 )
         self.assertFalse(target_path.exists())
         self.assertEqual(captured["path"].read_bytes(), b"intruder bytes")
+
+    def test_replacement_before_initialization_is_never_written(self) -> None:
+        # C-REV-01 follow-up probe 1: replace the candidate after exclusive
+        # creation and before the real initializer opens it. The other creator's
+        # bytes must stay unchanged and no target may appear.
+        target_path = self.root / "restored.sqlite"
+        captured: dict[str, Path] = {}
+        real_write = writing._write_restored_candidate
+
+        def replace_then_write(candidate, identity, collection_id, notes, retained):
+            captured["path"] = candidate
+            candidate.unlink()
+            candidate.write_bytes(b"other creator empty file")
+            return real_write(candidate, identity, collection_id, notes, retained)
+
+        with mock.patch.object(writing, "_write_restored_candidate", replace_then_write):
+            with self.assertRaises(StorageFailure) as error:
+                initialize_restored_collection(
+                    target_path, new_collection_id=new_identifier(),
+                    notes=(RestoredNote(new_identifier(), "N", "body", ()),),
+                )
+        self.assertTrue(error.exception.unknown)
+        self.assertFalse(target_path.exists())
+        self.assertEqual(captured["path"].read_bytes(), b"other creator empty file")
+
+    def test_overwritten_candidate_is_not_published_as_success(self) -> None:
+        # C-REV-01 follow-up probe 2: overwrite the initialized candidate in place
+        # (same inode). Content validity, not just identity, must stop publication.
+        target_path = self.root / "restored.sqlite"
+        real_publish = writing._publish_candidate
+
+        def overwrite_then_publish(candidate, identity, target, collection_id, notes, retained):
+            candidate.write_bytes(b"plain synthetic text, not a database")
+            return real_publish(candidate, identity, target, collection_id, notes, retained)
+
+        with mock.patch.object(writing, "_publish_candidate", overwrite_then_publish):
+            with self.assertRaises(StorageFailure):
+                initialize_restored_collection(
+                    target_path, new_collection_id=new_identifier(),
+                    notes=(RestoredNote(new_identifier(), "N", "body", ()),),
+                )
+        self.assertFalse(target_path.exists())
+        self.assertEqual(self.leftover_candidates(), [])
+
+    def test_replacement_between_verification_and_link_is_not_published(self) -> None:
+        # C-REV-01 follow-up: if the candidate is swapped after the pre-link
+        # verification, the created name must not be reported as a valid target.
+        target_path = self.root / "restored.sqlite"
+        real_link = os.link
+
+        def swap_then_link(source, destination, **kwargs):
+            path = Path(source)
+            path.unlink()
+            path.write_bytes(b"replacement between check and link")
+            return real_link(source, destination, **kwargs)
+
+        with mock.patch.object(writing.os, "link", swap_then_link):
+            with self.assertRaises(StorageFailure) as error:
+                initialize_restored_collection(
+                    target_path, new_collection_id=new_identifier(),
+                    notes=(RestoredNote(new_identifier(), "N", "body", ()),),
+                )
+        self.assertTrue(error.exception.unknown)
+        self.assertFalse(target_path.exists())
 
     def test_duplicate_note_identities_in_payload_are_rejected(self) -> None:
         note_id = new_identifier()

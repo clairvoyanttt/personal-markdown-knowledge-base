@@ -241,6 +241,26 @@ class ReferenceTests(QueryTestCase):
         self.assertEqual(self.search("未保存关键词").total, 1)
 
 
+class LinkWhitespaceSaveTests(QueryTestCase):
+    def test_trailing_blank_before_paren_creates_no_saved_reference(self) -> None:
+        # C-REV-06 end-to-end: real SAVE of the review bodies must store no
+        # occurrence and must not create a backlink on the target.
+        target = new_identifier()
+        self.save(note_id=target, name="Target")
+        marker = format_reference_marker(self.collection_id, target)
+        bodies = (
+            f"[label {marker}](https://example.com )",
+            f"[label {marker}](https://example.com\n)",
+            f"![label {marker}](image.png )",
+        )
+        for index, body in enumerate(bodies):
+            with self.subTest(body=body):
+                result = self.save(name=f"来源{index}", body=body)
+                self.assertEqual(result.state.value, "COMMITTED")
+        self.assertEqual(self.store.backlinks(target), ())
+        self.assertEqual(self.store.classify(parse_markdown(bodies[0], self.collection_id)), ())
+
+
 class SavedViewSnapshotTests(QueryTestCase):
     def test_saved_view_uses_a_single_read_transaction(self) -> None:
         # C-REV-02: body, relations, backlinks and the collection revision must be

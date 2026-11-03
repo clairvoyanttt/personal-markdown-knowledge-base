@@ -583,22 +583,50 @@ def initialize_restored_collection(
 
     candidate, identity = _create_candidate(target)
     try:
-        _write_restored_candidate(candidate, new_collection_id, notes, retained)
-        _publish_candidate(candidate, target)
+        _write_restored_candidate(candidate, identity, new_collection_id, notes, retained)
+        _publish_candidate(candidate, identity, target, new_collection_id, notes, retained)
     finally:
         _discard_candidate(candidate, identity)
     return RestoreInitResult(new_collection_id, 1, len(notes), len(retained))
 
 
+def _open_owned_candidate(path: Path, identity: tuple[int, int]) -> sqlite3.Connection:
+    """Open the candidate only while it is still the file this call created.
+
+    The identity is checked both before and after ``sqlite3.connect``; a path
+    replaced before the open is never written, and a replacement during the open
+    is detected before any statement runs (C-REV-01 follow-up).
+    """
+    if _candidate_identity(path) != identity:
+        raise StorageFailure(
+            "IO_FAILURE", "The restore candidate was replaced before initialization.",
+            "Do not treat this restore as started; the existing file was left untouched.",
+            unknown=True,
+        )
+    try:
+        connection = sqlite3.connect(path, timeout=10.0, autocommit=True)
+    except sqlite3.Error as error:
+        raise StorageFailure("IO_FAILURE", "The restore candidate could not be opened.") from error
+    if _candidate_identity(path) != identity:
+        connection.close()
+        raise StorageFailure(
+            "IO_FAILURE", "The restore candidate was replaced during initialization.",
+            "Do not treat this restore as started; the replaced file was left untouched.",
+            unknown=True,
+        )
+    return connection
+
+
 def _write_restored_candidate(
     path: Path,
+    identity: tuple[int, int],
     new_collection_id: str,
     notes: tuple[RestoredNote, ...],
     retained: tuple[RetainedIdentity, ...],
 ) -> None:
     connection = None
     try:
-        connection = sqlite3.connect(path, timeout=10.0, autocommit=True)
+        connection = _open_owned_candidate(path, identity)
         connection.execute("PRAGMA foreign_keys=ON")
         connection.executescript(
             files(__package__).joinpath("schema.sql").read_text(encoding="utf-8")
@@ -673,6 +701,8 @@ def _write_restored_candidate(
         raise
     finally:
         _close(connection)
+    # Content validity is proven before the file can be published.
+    _verify_candidate(path, identity, new_collection_id, notes, retained)
 
 
 # ---------------------------------------------------------------------------
@@ -756,8 +786,77 @@ def _discard_candidate(path: Path, identity: tuple[int, int]) -> None:
         pass
 
 
-def _publish_candidate(candidate: Path, target: Path) -> None:
-    """Publish atomically with a same-directory hard link; never overwrite."""
+def _verify_candidate(
+    path: Path,
+    identity: tuple[int, int],
+    new_collection_id: str,
+    notes: tuple[RestoredNote, ...],
+    retained: tuple[RetainedIdentity, ...],
+) -> None:
+    """Prove the file at ``path`` is still ours *and* a valid restored collection.
+
+    Identity alone cannot detect an in-place overwrite (same inode), so the
+    actual schema, metadata, row counts, initialization receipts and integrity are
+    re-read through a read-only connection before the file may be published
+    (C-REV-01 follow-up).
+    """
+    if _candidate_identity(path) != identity:
+        raise StorageFailure(
+            "IO_FAILURE", "The restore candidate was replaced before verification.",
+            "Do not treat this restore as complete; the replaced file was left untouched.",
+            unknown=True,
+        )
+    reader = None
+    try:
+        reader = sqlite3.connect(
+            f"{path.resolve().as_uri()}?mode=ro", uri=True, timeout=10.0, autocommit=True
+        )
+        reader.execute("PRAGMA foreign_keys=ON")
+        metadata = reader.execute(
+            "SELECT collectionId, schemaVersion, collectionRevision, state FROM CollectionMeta"
+        ).fetchall()
+        note_rows = reader.execute("SELECT COUNT(*) FROM Notes").fetchone()[0]
+        key_rows = reader.execute("SELECT COUNT(*) FROM NoteKeys").fetchone()[0]
+        kinds = dict(reader.execute(
+            "SELECT operationKind, COUNT(*) FROM CommitReceipt GROUP BY operationKind"
+        ).fetchall())
+        initialized = reader.execute(
+            "SELECT COUNT(*) FROM Notes n JOIN CommitReceipt r ON r.commandId=n.lastCommitId"
+            " WHERE n.revision=1 AND r.operationKind='RESTORE_NOTE_INIT'"
+        ).fetchone()[0]
+        expected_kinds = {"RESTORE_INIT": 1}
+        if notes:
+            expected_kinds["RESTORE_NOTE_INIT"] = len(notes)
+        if metadata != [(new_collection_id, 1, 1, "READY")]:
+            raise StorageFailure(
+                "INVALID_ARGUMENT", "The restored collection metadata is not the expected new collection.",
+            )
+        if (note_rows != len(notes) or key_rows != len(notes) + len(retained)
+                or kinds != expected_kinds or initialized != len(notes)):
+            raise StorageFailure("INVALID_ARGUMENT", "Restored rows or receipts are incomplete.")
+        if reader.execute("PRAGMA quick_check").fetchall() != [("ok",)]:
+            raise StorageFailure("INVALID_ARGUMENT", "The restored collection failed its integrity check.")
+        if reader.execute("PRAGMA foreign_key_check").fetchall():
+            raise StorageFailure("INVALID_ARGUMENT", "Restored relationships are inconsistent.")
+    except sqlite3.Error as error:
+        raise StorageFailure("IO_FAILURE", "The restored candidate could not be verified.") from error
+    finally:
+        if reader is not None:
+            reader.close()
+
+
+def _publish_candidate(
+    candidate: Path,
+    identity: tuple[int, int],
+    target: Path,
+    new_collection_id: str,
+    notes: tuple[RestoredNote, ...],
+    retained: tuple[RetainedIdentity, ...],
+) -> None:
+    """Verify, publish atomically, then prove the published target is our file."""
+    # A candidate overwritten in place keeps its inode, so content validity is
+    # re-proven immediately before the link is created.
+    _verify_candidate(candidate, identity, new_collection_id, notes, retained)
     try:
         os.link(candidate, target)
     except FileExistsError as error:
@@ -775,3 +874,20 @@ def _publish_candidate(candidate: Path, target: Path) -> None:
         raise StorageFailure(
             "IO_FAILURE", "The restored collection could not be published safely."
         ) from error
+    if _candidate_identity(target) != identity:
+        # The name we created does not point at the verified inode. Remove only
+        # that name (the other file keeps its own name) and never report success.
+        try:
+            target.unlink()
+        except OSError:
+            pass
+        raise StorageFailure(
+            "IO_FAILURE", "The published restore target could not be confirmed.",
+            "Inspect the target location; do not treat this restore as complete.",
+            unknown=True,
+        )
+    try:
+        _verify_candidate(target, identity, new_collection_id, notes, retained)
+    except StorageFailure:
+        _discard_candidate(target, identity)
+        raise
