@@ -70,10 +70,103 @@ class EditorDesktopTests(unittest.TestCase):
 
     def test_export_saved_only_and_reject_edit_after_confirmation(self):
         import asyncio
+        from threading import Event
         from pmkb.application.export.service import SavedExportNote
+
+        started, release = Event(), Event()
+
+        class Source:
+            name = '课程/笔记'
+            reads = 0
+
+            async def read_saved(self, context, note_id, cancel):
+                self.reads += 1
+                started.set()
+                while not release.is_set() and not cancel.is_set():
+                    await asyncio.sleep(.001)
+                return SavedExportNote(context, note_id, 1, 2, self.name, 'saved body', ())
+
+        self.activate()
+        storage = MemoryStorage()
+        self.window.editing.storage = storage
+        source = Source()
+        self.window.export_source = source
+        loaded = asyncio.run(self.window.editing.load_note(
+            LoadNoteRequest(self.window.editing.context, 'b' * 32)))
+        self.window._active_buffer = loaded.value.snapshot.buffer_id
+        self.window._refresh(refresh_text=True)
+        self.window.name.setText('未保存的新标题')
+        self.window._apply_name()
+        self.window.body.setPlainText('unsaved text')
+        destination = self.root / 'saved.md'
+
+        def accept(dialog):
+            dialog.buttons()[0].click()
+
+        with patch.object(QMessageBox, 'exec', accept), \
+             patch('pmkb.desktop.editor.QFileDialog.getSaveFileName') as choose_file:
+            self.window.export_button.click()
+            try:
+                self.pump(started.is_set)
+                self.window.body.setPlainText('edited while reading')
+            finally:
+                release.set()
+            self.pump(lambda: '草稿或集合状态已变化' in self.window.statusBar().currentMessage())
+            choose_file.assert_not_called()
+
+        for title, expected in [('课程/笔记', 'note-课程_笔记.md'), ('CON', 'note-CON.md'),
+                                ('复习.md', 'note-复习.md.md')]:
+            with self.subTest(title=title):
+                source.name = title
+                with patch.object(QMessageBox, 'exec', accept), \
+                     patch('pmkb.desktop.editor.QFileDialog.getSaveFileName',
+                           return_value=('', '')) as choose_file:
+                    self.window.statusBar().clearMessage()
+                    self.window.export_button.click()
+                    self.pump(lambda: self.window.statusBar().currentMessage() == '操作已取消。')
+                    self.assertEqual(choose_file.call_args.args[2], expected)
+                self.assertFalse(destination.exists())
+
+        def choose(*args, **kwargs):
+            self.window.body.setPlainText('edited while choosing')
+            return str(destination), ''
+
+        with patch.object(QMessageBox, 'exec', accept), \
+             patch('pmkb.desktop.editor.QFileDialog.getSaveFileName', side_effect=choose):
+            self.window.statusBar().clearMessage()
+            self.window.export_button.click()
+            self.pump(lambda: '草稿或集合状态已变化' in self.window.statusBar().currentMessage())
+        self.assertFalse(destination.exists())
+
+        with patch.object(QMessageBox, 'exec', accept), \
+             patch('pmkb.desktop.editor.QFileDialog.getSaveFileName', return_value=(str(destination), '')) as choose_file:
+            reads = source.reads
+            self.window.export_button.click()
+            self.pump(lambda: self.window.statusBar().currentMessage().startswith('已导出'))
+            self.assertEqual(choose_file.call_args.args[2], 'note-复习.md.md')
+            self.assertEqual(source.reads, reads + 1)
+            self.assertEqual(destination.read_bytes(), b'saved body')
+            self.window.export_button.click()
+            self.pump(lambda: 'TARGET_EXISTS' in self.window.statusBar().currentMessage())
+        self.assertEqual(destination.read_bytes(), b'saved body')
+        self.assertEqual(self.window.body.toPlainText(), 'edited while choosing')
+        self.assertEqual(self.window._current().snapshot.name, '未保存的新标题')
+        self.assertTrue(self.window._current().is_dirty)
+        self.assertEqual(storage.calls, [])
+
+    def test_exit_during_saved_export_read_never_opens_file_chooser(self):
+        import asyncio
+        from threading import Event
+        from pmkb.application.export.service import SavedExportNote
+
+        started, cancelled = Event(), Event()
 
         class Source:
             async def read_saved(self, context, note_id, cancel):
+                started.set()
+                while not cancel.is_set():
+                    await asyncio.sleep(.001)
+                cancelled.set()
                 return SavedExportNote(context, note_id, 1, 2, 'saved name', 'saved body', ())
 
         self.activate()
@@ -83,32 +176,18 @@ class EditorDesktopTests(unittest.TestCase):
             LoadNoteRequest(self.window.editing.context, 'b' * 32)))
         self.window._active_buffer = loaded.value.snapshot.buffer_id
         self.window._refresh(refresh_text=True)
-        self.window.body.setPlainText('unsaved text')
-        destination = self.root / 'saved.md'
+        destination = self.root / 'must-not-export.md'
 
-        def accept(dialog):
-            dialog.buttons()[0].click()
-
-        def choose(*args, **kwargs):
-            self.window.body.setPlainText('edited while choosing')
-            return str(destination), ''
-
-        with patch.object(QMessageBox, 'exec', accept), \
-             patch('pmkb.desktop.editor.QFileDialog.getSaveFileName', side_effect=choose):
+        with patch.object(QMessageBox, 'exec', lambda dialog: dialog.buttons()[0].click()), \
+             patch('pmkb.desktop.editor.QFileDialog.getSaveFileName',
+                   return_value=(str(destination), '')) as choose_file:
             self.window.export_button.click()
+            self.pump(started.is_set)
+            self.window.close()
+            self.pump(lambda: self.window.runtime.is_stopped and not self.window.isVisible())
+            choose_file.assert_not_called()
+        self.assertTrue(cancelled.is_set())
         self.assertFalse(destination.exists())
-        self.assertEqual(self.window.runtime.pending_count, 0)
-
-        with patch.object(QMessageBox, 'exec', accept), \
-             patch('pmkb.desktop.editor.QFileDialog.getSaveFileName', return_value=(str(destination), '')):
-            self.window.export_button.click()
-            self.pump(lambda: self.window.statusBar().currentMessage().startswith('已导出'))
-            self.assertEqual(destination.read_bytes(), b'saved body')
-            self.window.export_button.click()
-            self.pump(lambda: 'TARGET_EXISTS' in self.window.statusBar().currentMessage())
-        self.assertEqual(destination.read_bytes(), b'saved body')
-        self.assertEqual(self.window.body.toPlainText(), 'edited while choosing')
-        self.assertTrue(self.window._current().is_dirty)
 
     def test_startup_has_no_config_write_or_fake_saved_rows(self):
         self.assertFalse((self.root / 'config').exists())

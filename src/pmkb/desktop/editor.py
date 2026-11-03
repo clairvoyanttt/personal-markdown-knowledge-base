@@ -1,4 +1,5 @@
 """Qt editor consuming application services. Unavailable providers stay explicit."""
+from dataclasses import dataclass
 from pathlib import Path
 import secrets
 
@@ -14,8 +15,9 @@ from pmkb.application.collection.context_gate import ActiveContextGate
 from pmkb.application.editing.service import EditingService, EditingFailure, single_line
 from pmkb.application.editing.preview import PreviewService
 from pmkb.application.editing.text_edit import apply_widget_text
-from pmkb.application.export.service import ExportRequest, ExportService
-from pmkb.application.output_support import OutputBufferState, OutputSessionState
+from pmkb.application.export.naming import default_export_name
+from pmkb.application.export.service import ExportRequest, ExportService, SavedExportNote
+from pmkb.application.output_support import OutputBufferState, OutputFailure, OutputSessionState, result
 from pmkb.contracts.backup import UnsavedBackupChoice
 from pmkb.contracts.collections import (
     ActivationMode, CancelActivationRequest, CompleteActivationRequest,
@@ -53,6 +55,16 @@ class ExportSession:
                 for v in editor.views()), editor.has_unconfirmed_save,
                 self.acknowledged if context == self.context else ())
         return await self.window.dispatcher.invoke(capture)
+
+
+@dataclass(frozen=True)
+class CapturedExportSource:
+    note: SavedExportNote
+
+    async def read_saved(self, context, note_id, cancel):
+        if self.note.context == context and self.note.note_id == note_id and not cancel.is_set():
+            return self.note
+        return None
 
 
 class EditorWindow(StartupWindow):
@@ -382,23 +394,59 @@ class EditorWindow(StartupWindow):
         dialog.exec()
         if dialog.clickedButton() is not proceed:
             return
-        filename, _ = QFileDialog.getSaveFileName(
-            self, '选择 Markdown 导出位置（不覆盖已有文件）', 'note.md', 'Markdown (*.md)',
-            options=QFileDialog.Option.DontConfirmOverwrite)
-        if not filename:
+
+        def check_selection():
+            current = self._current()
+            if not self._can_export(current) or self.editing.context != context or current != view:
+                raise OutputFailure('STATE_BLOCKED', '草稿或集合状态已变化，请重新确认导出。')
+
+        try:
+            check_selection()
+        except OutputFailure as error:
+            self.statusBar().showMessage(error.error.reason)
             return
-        current = self._current()
-        if (not self._can_export(current) or self.editing.context != context or current != view):
-            self.statusBar().showMessage('草稿或集合状态已变化，请重新确认导出。')
-            return
-        destination = Path(filename).absolute()
+
+        def choose_file(default_name, cancel):
+            if cancel.is_set():
+                return ''
+            check_selection()
+            filename, _ = QFileDialog.getSaveFileName(
+                self, '选择 Markdown 导出位置（不覆盖已有文件）', default_name, 'Markdown (*.md)',
+                options=QFileDialog.Option.DontConfirmOverwrite)
+            if filename and not cancel.is_set():
+                check_selection()
+            return filename
+
+        source = self.export_source
         acknowledged = ((snapshot.buffer_id, snapshot.edit_version),) if view.is_dirty else ()
         session = ExportSession(self, context, acknowledged)
-        request = ExportRequest(context, snapshot.note_id, str(destination.parent), destination.name,
-                                UnsavedBackupChoice.CONTINUE_SAVED_ONLY if view.is_dirty
-                                else UnsavedBackupChoice.NO_UNSAVED)
-        service = ExportService(self.export_source, session)
-        self._submit(lambda cancel: service.export_note(request, cancel), self._export_finished)
+        choice = (UnsavedBackupChoice.CONTINUE_SAVED_ONLY if view.is_dirty
+                  else UnsavedBackupChoice.NO_UNSAVED)
+
+        async def export(cancel):
+            try:
+                if cancel.is_set():
+                    return result(context, ResultStatus.CANCELLED)
+                note = await source.read_saved(context, snapshot.note_id, cancel)
+                if cancel.is_set():
+                    return result(context, ResultStatus.CANCELLED)
+                if note is None:
+                    raise OutputFailure('NO_SAVED_VERSION', '当前笔记没有可导出的保存版本。')
+                if (not isinstance(note, SavedExportNote) or note.context != context
+                        or note.note_id != snapshot.note_id or note.saved_revision != snapshot.base_revision):
+                    raise OutputFailure('STATE_BLOCKED', '保存版本已变化，请刷新后重新确认导出。')
+                default_name = default_export_name(note.saved_name)
+                filename = await self.dispatcher.invoke(lambda: choose_file(default_name, cancel))
+                if not filename or cancel.is_set():
+                    return result(context, ResultStatus.CANCELLED)
+                destination = Path(filename).absolute()
+            except OutputFailure as error:
+                return result(context, ResultStatus.ERROR, error=error.error)
+            service = ExportService(CapturedExportSource(note), session)
+            request = ExportRequest(context, snapshot.note_id, str(destination.parent), destination.name, choice)
+            return await service.export_note(request, cancel)
+
+        self._submit(export, self._export_finished)
 
     def _export_finished(self, result):
         if result.status == ResultStatus.OK:
