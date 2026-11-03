@@ -6,7 +6,7 @@
 
 **结论：请求修改，暂不合并 C 后端。** 三项阻断问题已通过定向探针复现并经独立 AI 复核。本文发布到主线仅用于共享审查意见，不代表 C 后端已合并、已批准或已完成产品验收；也不表示任何成员完成了人工核查。
 
-**最新复审：** C 已在原分支连续返修。第 11 节为第四轮最新结论：C-REV-01 续与 C-REV-07 已通过真实文件和独立探针确认修复，第四轮结论为通过，按既有授权合并 PR #13（最终状态以 PR 实际记录为准）。第 1—10 节为此前审查记录，不能将其全部条目继续认定为未修复。
+**最新复审：** C 已在原分支连续返修。第 12 节为第五轮最新结论：第四轮列出的回执与 `displayHint` 残余已由 PR #18 修复，经真实文件和独立探针复核通过并合并（`ef602aa`）；第 11 节为第四轮结论（PR #13 已合并）。第 1—10 节为此前审查记录，不能将其全部条目继续认定为未修复。
 
 ## 1. 返修方式与范围
 
@@ -230,3 +230,38 @@ bodies = (
 ### 结论
 
 C-REV-01 续与 C-REV-07 均经真实文件、真实发布路径复核通过，未发现新增阻断问题，按既有授权合并 PR #13。本节数字为本轮实际结果；完整 V01—V16 产品验收、正式性能验收和真实界面/离线/隐私验证仍未执行，合并组件不等于产品验收，Issue #3 不因合并关闭。
+
+## 12. 第五轮复审：回执与 displayHint 残余已修复，通过并合并 PR #18
+
+审查对象为 [PR #18](https://github.com/clairvoyanttt/personal-markdown-knowledge-base/pull/18) head `a235ca8`（`fix(storage): verify restore receipt ownership and display hints (refs #3)`，作者 herbelat），base `main` `d940919`。该提交只改动 3 个文件：`src/pmkb/infrastructure/storage/writing.py`、`tests/test_c_snapshot.py`、`docs/development/c-storage-query.md`，未发现越界改动。本轮使用该提交的仓库外源码快照与独立探针复核，不继承作者或此前轮次的测试数字。
+
+本轮实际运行：
+
+- 快照 `scripts/check.py`：**579 项发现、577 通过、2 项因 Windows 符号链接权限（1314）跳过、12.974 秒、退出码 0**；C 的 6 个测试模块单独运行 **102/102 通过**。
+- PR CI 41628148497、41628185027（head `a235ca8`）均为 success。
+- 合并后 `main` `ef602aa` 仓库外快照：**579 项发现、577 通过、2 项跳过、23.491 秒、退出码 0**；main CI 41629613518（head `ef602aa`）success。两项跳过分属 D 的符号链接用例，不计为通过。
+
+### 修复内容
+
+`_verify_candidate()` 补齐第 11 节列出的两项非阻断残余：
+
+- `RESTORE_INIT` 恰好 1 条：`collectionId` 为新集合，`noteId`/`beforeRevision`/`afterRevision` 均为 NULL，`collectionRevision`=1。
+- `RESTORE_NOTE_INIT` 数量与 notes 一致，每条 `collectionId` 为新集合、`noteId` 属于本批、`beforeRevision` NULL、`afterRevision`=1、`collectionRevision`=1。
+- 每篇 `Notes.lastCommitId` 必须指向**该篇自己的** `RESTORE_NOTE_INIT` 回执（按 `commandId` 关联后逐篇核对）。
+- 每篇笔记的 `RefOccurrence.displayHint` 必须全部为 NULL（写入时固定 NULL）。
+
+### 独立探针
+
+均在真实候选文件上、真实 `_publish_candidate()` 发布前原位改写：
+
+- `RESTORE_NOTE_INIT.noteId` 互换、`Notes.lastCommitId` 互换、`RESTORE_NOTE_INIT.afterRevision=2`、`RESTORE_INIT.collectionRevision=2`、`RESTORE_NOTE_INIT.collectionId` 改写、`RefOccurrence.displayHint='legacy hint'`：**6/6 均返回 `StorageFailure`（`INVALID_ARGUMENT`），目标未创建、未报告成功**。
+- `RefOccurrence.sourceRevision=2`：虽未进入显式投影，但被最终 `PRAGMA foreign_key_check` 拒绝，目标未创建。
+- 正向与既有修复回归：C-REV-01 续（发布后目标被替换仍报 unknown 且保留竞争者字节）、C-REV-07（同 inode 同长度正文替换被拒）、C-REV-06 解析样例、正常恢复（两篇笔记、名称规范化、标签、三条引用、保留身份、空集合）均重新通过。
+
+### 非阻断观察（建议后续跟进）
+
+对同一候选原位改写 `CommitReceipt.operationId` 仍可通过验证并发布。该值是写入时生成的随机操作标识，不属于请求负载的预期投影，也不改变笔记、引用或回执语义；如后续要求回执台账逐字段一致，再纳入校验即可。此项不阻断本轮合并。
+
+### 结论
+
+第 11 节所列残余已补齐并经独立探针确认，未发现新增阻断问题。PR #18 已按既有授权合并为 **`ef602aa`**；正式审查记录为 AI 技术复审 5751562671（state=APPROVED，正文明确标注 AI、非人工审查）。以上均为组件级存储复审与回归，不等于 V01—V16 完整产品验收、正式性能验收或真实界面/离线/隐私验证；Issue #3 不因合并关闭。
