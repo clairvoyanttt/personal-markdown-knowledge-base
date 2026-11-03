@@ -1,0 +1,324 @@
+{
+  "dataset_id": "PMKB-V10-2026-11-03",
+  "spec_version": 1,
+  "note_count": 1000,
+  "body_utf8_bytes_exact": 10240,
+  "id_rule": "note_id = 32 lowercase hex digits of zero-based index i, i=0..999",
+  "name_rule": "name = '笔记 ' + four-digit zero-padded index",
+  "digest_rule": "SHA-256 over UTF-8 of the ascending-sorted matching note IDs joined by '\n' (no trailing newline)",
+  "queries": [
+    {
+      "id": "Q01",
+      "keyword": "TOKEN-0042",
+      "tags": [],
+      "expected_count": 1,
+      "expected_ids_sha256": "9c2a045065196edb58a47e794e84679d60d1a3a7eb0915c959ef7dfb1e198b41",
+      "expected_note_ids": [
+        "0000000000000000000000000000002a"
+      ]
+    },
+    {
+      "id": "Q02",
+      "keyword": "token-0900",
+      "tags": [],
+      "expected_count": 1,
+      "expected_ids_sha256": "60bd4f1c8ee30f90e2de383bc30d90770e6f08c86d4cd1c9086e9b7bb26fa3ce",
+      "expected_note_ids": [
+        "00000000000000000000000000000384"
+      ]
+    },
+    {
+      "id": "Q03",
+      "keyword": "TOKEN-0900",
+      "tags": [],
+      "expected_count": 1,
+      "expected_ids_sha256": "60bd4f1c8ee30f90e2de383bc30d90770e6f08c86d4cd1c9086e9b7bb26fa3ce",
+      "expected_note_ids": [
+        "00000000000000000000000000000384"
+      ]
+    },
+    {
+      "id": "Q04",
+      "keyword": "笔记 0123",
+      "tags": [],
+      "expected_count": 1,
+      "expected_ids_sha256": "ee99f2fd345cf2c3535bc49016fee21f5e50e721438f4217b29ef5fe65b0add1",
+      "expected_note_ids": [
+        "0000000000000000000000000000007b"
+      ]
+    },
+    {
+      "id": "Q05",
+      "keyword": "笔记 04",
+      "tags": [],
+      "expected_count": 100,
+      "expected_ids_sha256": "aed146f07c7a9d6a5d65ee29a96c883177cbdb23d7aff6069ea66b2aeb7ba000",
+      "expected_note_ids": null
+    },
+    {
+      "id": "Q06",
+      "keyword": "TOKEN-09",
+      "tags": [],
+      "expected_count": 100,
+      "expected_ids_sha256": "0c7d77654764e87a393f02bee79e9825084599d831d924c8dd667788fc8fd0ce",
+      "expected_note_ids": null
+    },
+    {
+      "id": "Q07",
+      "keyword": "TOKEN-1",
+      "tags": [],
+      "expected_count": 0,
+      "expected_ids_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "expected_note_ids": []
+    },
+    {
+      "id": "Q08",
+      "keyword": "课程笔记内容",
+      "tags": [],
+      "expected_count": 1000,
+      "expected_ids_sha256": "607071c9cd233766440a6e88c7eec7458f71f8de3c768effa9ae7f02035255a9",
+      "expected_note_ids": null
+    },
+    {
+      "id": "Q09",
+      "keyword": "复习要点",
+      "tags": [],
+      "expected_count": 1000,
+      "expected_ids_sha256": "607071c9cd233766440a6e88c7eec7458f71f8de3c768effa9ae7f02035255a9",
+      "expected_note_ids": null
+    },
+    {
+      "id": "Q10",
+      "keyword": "knowledge",
+      "tags": [],
+      "expected_count": 0,
+      "expected_ids_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "expected_note_ids": []
+    },
+    {
+      "id": "Q11",
+      "keyword": "English",
+      "tags": [],
+      "expected_count": 1000,
+      "expected_ids_sha256": "607071c9cd233766440a6e88c7eec7458f71f8de3c768effa9ae7f02035255a9",
+      "expected_note_ids": null
+    },
+    {
+      "id": "Q12",
+      "keyword": "english",
+      "tags": [],
+      "expected_count": 1000,
+      "expected_ids_sha256": "607071c9cd233766440a6e88c7eec7458f71f8de3c768effa9ae7f02035255a9",
+      "expected_note_ids": null
+    },
+    {
+      "id": "Q13",
+      "keyword": "mixed text",
+      "tags": [],
+      "expected_count": 1000,
+      "expected_ids_sha256": "607071c9cd233766440a6e88c7eec7458f71f8de3c768effa9ae7f02035255a9",
+      "expected_note_ids": null
+    },
+    {
+      "id": "Q14",
+      "keyword": "2026",
+      "tags": [],
+      "expected_count": 1000,
+      "expected_ids_sha256": "607071c9cd233766440a6e88c7eec7458f71f8de3c768effa9ae7f02035255a9",
+      "expected_note_ids": null
+    },
+    {
+      "id": "Q15",
+      "keyword": "UniqueMarker",
+      "tags": [],
+      "expected_count": 1000,
+      "expected_ids_sha256": "607071c9cd233766440a6e88c7eec7458f71f8de3c768effa9ae7f02035255a9",
+      "expected_note_ids": null
+    },
+    {
+      "id": "Q16",
+      "keyword": "不存在的关键词",
+      "tags": [],
+      "expected_count": 0,
+      "expected_ids_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "expected_note_ids": []
+    },
+    {
+      "id": "Q17",
+      "keyword": "笔记 0000",
+      "tags": [],
+      "expected_count": 1,
+      "expected_ids_sha256": "84e0c0eafaa95a34c293f278ac52e45ce537bab5e752a00e6959a13ae103b65a",
+      "expected_note_ids": [
+        "00000000000000000000000000000000"
+      ]
+    },
+    {
+      "id": "Q18",
+      "keyword": "TOKEN-0000",
+      "tags": [],
+      "expected_count": 1,
+      "expected_ids_sha256": "84e0c0eafaa95a34c293f278ac52e45ce537bab5e752a00e6959a13ae103b65a",
+      "expected_note_ids": [
+        "00000000000000000000000000000000"
+      ]
+    },
+    {
+      "id": "Q19",
+      "keyword": "TOKEN-0500",
+      "tags": [],
+      "expected_count": 1,
+      "expected_ids_sha256": "863e8fe5f9d29e4780a64df8ccc5dcd77f44ef07ff6f87d76a87b86954e53abf",
+      "expected_note_ids": [
+        "000000000000000000000000000001f4"
+      ]
+    },
+    {
+      "id": "Q20",
+      "keyword": "笔记 0999",
+      "tags": [],
+      "expected_count": 1,
+      "expected_ids_sha256": "91676f37a6a800ed4bf46a1d54d7a2d7c77b4ec2f233530dfb1e49a5b665b580",
+      "expected_note_ids": [
+        "000000000000000000000000000003e7"
+      ]
+    },
+    {
+      "id": "Q21",
+      "keyword": "数字",
+      "tags": [],
+      "expected_count": 1000,
+      "expected_ids_sha256": "607071c9cd233766440a6e88c7eec7458f71f8de3c768effa9ae7f02035255a9",
+      "expected_note_ids": null
+    },
+    {
+      "id": "Q22",
+      "keyword": "TOKEN-0499",
+      "tags": [],
+      "expected_count": 1,
+      "expected_ids_sha256": "7026b8ce4c93beb15b473719a9d7a291049978ad7252716239bfa757533db34c",
+      "expected_note_ids": [
+        "000000000000000000000000000001f3"
+      ]
+    },
+    {
+      "id": "Q23",
+      "keyword": "笔记 0500",
+      "tags": [],
+      "expected_count": 1,
+      "expected_ids_sha256": "863e8fe5f9d29e4780a64df8ccc5dcd77f44ef07ff6f87d76a87b86954e53abf",
+      "expected_note_ids": [
+        "000000000000000000000000000001f4"
+      ]
+    },
+    {
+      "id": "Q24",
+      "keyword": "UniqueMarker",
+      "tags": [
+        "课程"
+      ],
+      "expected_count": 100,
+      "expected_ids_sha256": "be5b8086de66ee58bf69dd67250cb5ade4620f03db33dd9368964838a08f675a",
+      "expected_note_ids": null
+    },
+    {
+      "id": "Q25",
+      "keyword": "笔记",
+      "tags": [
+        "复习"
+      ],
+      "expected_count": 110,
+      "expected_ids_sha256": "1db0b9acb5101ca2a8e56488f19196e22cd46e0d553bfd9a8d1cb02509203657",
+      "expected_note_ids": null
+    },
+    {
+      "id": "Q26",
+      "keyword": "笔记",
+      "tags": [
+        "AI"
+      ],
+      "expected_count": 100,
+      "expected_ids_sha256": "a4af7df2d2e5ee5bd8abf6c5bebadeab28381a31af4118f96848d5dbd8b1aad4",
+      "expected_note_ids": null
+    },
+    {
+      "id": "Q27",
+      "keyword": "笔记",
+      "tags": [
+        "ai"
+      ],
+      "expected_count": 110,
+      "expected_ids_sha256": "eeb056e7585b993c32068be4e8acfd690a31461ef6aebae4c14676d3762c601d",
+      "expected_note_ids": null
+    },
+    {
+      "id": "Q28",
+      "keyword": "笔记",
+      "tags": [
+        "课程",
+        "复习"
+      ],
+      "expected_count": 10,
+      "expected_ids_sha256": "5854964f3365e3a837e90a3d0245c5916c8936738a7b50cb4a17ed8e704eb72b",
+      "expected_note_ids": [
+        "0000000000000000000000000000000a",
+        "0000000000000000000000000000006e",
+        "000000000000000000000000000000d2",
+        "00000000000000000000000000000136",
+        "0000000000000000000000000000019a",
+        "000000000000000000000000000001fe",
+        "00000000000000000000000000000262",
+        "000000000000000000000000000002c6",
+        "0000000000000000000000000000032a",
+        "0000000000000000000000000000038e"
+      ]
+    },
+    {
+      "id": "Q29",
+      "keyword": "TOKEN-0012",
+      "tags": [
+        "AI",
+        "ai"
+      ],
+      "expected_count": 1,
+      "expected_ids_sha256": "f8072c1d58c5f5a1fc9299e5d06463dcc7b1f04e949614457d070f2e12076752",
+      "expected_note_ids": [
+        "0000000000000000000000000000000c"
+      ]
+    },
+    {
+      "id": "Q30",
+      "keyword": "TOKEN-0005",
+      "tags": [
+        "不存在"
+      ],
+      "expected_count": 0,
+      "expected_ids_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "expected_note_ids": []
+    }
+  ],
+  "spec_sha256": "05632f8c3e132fee88021cdb0123984867c27d0b6cf8f0b7c8f8c2a86fe7667c",
+  "body_spec": {
+    "utf8_bytes_exact": 10240,
+    "reference_prefix_utf8_bytes": 75,
+    "max_reference_notes": 50,
+    "filler": "课程笔记内容与复习要点，包含中文与 English mixed text 以及数字 2026。\n",
+    "prefix": "笔记 {i:04d} 的正文。\nTOKEN-{i:04d} UniqueMarker。\n"
+  },
+  "warmup": {
+    "queries": [
+      "TOKEN-0001",
+      "TOKEN-0998",
+      "笔记 0001",
+      "笔记 0998",
+      "TOKEN-0777"
+    ],
+    "repetitions": 3,
+    "discard_results": true
+  },
+  "criteria": {
+    "all_queries_correct": 30,
+    "queries_within_2000ms_required": 29,
+    "elapsed_threshold_ms": 2000
+  }
+}
