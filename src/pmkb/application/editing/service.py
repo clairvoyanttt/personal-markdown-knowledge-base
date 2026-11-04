@@ -109,6 +109,16 @@ class EditingService:
         with self.lock:
             return self._pending
 
+    def discard_draft(self, context, buffer_id, expected_version):
+        with self.lock:
+            if context != self.context or self.busy or self._pending is not None:
+                return False
+            buffer = self._buffers.get(buffer_id)
+            if buffer is None or buffer.snapshot.edit_version != expected_version:
+                return False
+            del self._buffers[buffer_id]
+            return True
+
     def finish_saved_delete(self, note_id):
         with self.lock:
             for key, buffer in tuple(self._buffers.items()):

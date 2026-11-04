@@ -3,7 +3,6 @@ from dataclasses import dataclass
 from pathlib import Path
 import secrets
 import asyncio
-from concurrent.futures import ThreadPoolExecutor
 
 from PySide6.QtCore import Qt, QSignalBlocker, QTimer
 from PySide6.QtGui import QKeySequence, QShortcut
@@ -37,7 +36,6 @@ from pmkb.desktop.editor_session import EditorSession
 
 from pmkb.infrastructure.storage.editing_storage import SqliteEditingStorage
 from pmkb.infrastructure.storage.store import CollectionStore
-from pmkb.infrastructure.storage.export_source import CExportSource
 from pmkb.desktop.saved_panel import SavedPanel
 
 
@@ -76,11 +74,14 @@ class CapturedExportSource:
 
 
 class EditorWindow(SavedPanel, StartupWindow):
-    def __init__(self, config_file: Path, storage=None, preview_renderer=None, *, export_source=None, use_collection_storage=False):
+    def __init__(self, config_file: Path, storage=None, preview_renderer=None, *, export_source=None, use_collection_storage=False, mvp_mode=False):
         config_file = Path(config_file)
         if not config_file.is_absolute():
             raise ValueError('The application must supply an absolute configuration path.')
         super().__init__()
+        self.mvp_mode = mvp_mode
+        if mvp_mode:
+            preview_renderer = export_source = None
         self.editing = EditingService(ActiveContextGate(), storage)
         self.session = EditorSession(self.editing, self.dispatcher,
                                      install_view=self._install_collection_view)
@@ -88,9 +89,9 @@ class EditorWindow(SavedPanel, StartupWindow):
         self._use_collection_storage = use_collection_storage
         self._owned_storage = None
         self._storage_adapters = []
-        self._storage_retire = None
         if use_collection_storage:
-            self._storage_retire = ThreadPoolExecutor(max_workers=1, thread_name_prefix="pmkb-retire")
+            self.session.before_activate = self._prepare_collection_storage
+            self.session.activation_rejected = self._restore_collection_storage
             self.runtime.add_finalizer(self._close_collection_storage)
         self.export_source = export_source
         self.previews = PreviewService(self.editing, preview_renderer)
@@ -105,7 +106,7 @@ class EditorWindow(SavedPanel, StartupWindow):
         self._exit_polling = False
         self._unknown_exit = None
         self._draft_text_inputs: dict[str, str] = {}
-        self.setWindowTitle('个人 Markdown 知识库 · B 编辑开发版')
+        self.setWindowTitle('个人 Markdown 知识库 · 最小交付版' if mvp_mode else '个人 Markdown 知识库 · B 编辑开发版')
         self.resize(1180, 760)
         self._build_ui()
         self.cancel_exit_button = QPushButton('取消退出', self)
@@ -121,11 +122,13 @@ class EditorWindow(SavedPanel, StartupWindow):
         self.location = QLabel('尚未打开集合')
         self.location.setTextFormat(Qt.TextFormat.PlainText)
         self.location.setWordWrap(True)
+        self.collection_buttons = []
         for title, callback in [('新建集合', lambda: self.choose_collection(ActivationMode.CREATE)),
-                                ('打开 / 切换集合', lambda: self.choose_collection(ActivationMode.OPEN))]:
+                                (('打开集合' if self.mvp_mode else '打开 / 切换集合'), lambda: self.choose_collection(ActivationMode.OPEN))]:
             button = QPushButton(title)
             button.clicked.connect(callback)
             row.addWidget(button)
+            self.collection_buttons.append(button)
         row.addWidget(self.location, 1)
         layout.addLayout(row)
         self.notice = QLabel('编辑区显示会话草稿；列表、查询和导出使用已保存版本。')
@@ -141,12 +144,12 @@ class EditorWindow(SavedPanel, StartupWindow):
         self.drafts = QListWidget()
         self.drafts.currentItemChanged.connect(self._select_draft)
         left_layout.addWidget(self.drafts)
-        left_layout.addWidget(QLabel('保存版列表 / 搜索 / 标签筛选'))
+        left_layout.addWidget(QLabel('保存版列表 / 搜索' if self.mvp_mode else '保存版列表 / 搜索 / 标签筛选'))
         self.build_saved_panel(left_layout)
         splitter.addWidget(left)
         center = QWidget()
         form = QVBoxLayout(center)
-        form.addWidget(QLabel('名称（改名需手动保存）'))
+        form.addWidget(QLabel('名称（新建时填写）' if self.mvp_mode else '名称（改名需手动保存）'))
         self.name = QLineEdit()
         self.name.textEdited.connect(self._apply_name)
         form.addWidget(self.name)
@@ -166,10 +169,16 @@ class EditorWindow(SavedPanel, StartupWindow):
         remove = QPushButton('移除选中标签')
         remove.clicked.connect(self.remove_tag)
         tags_row.addWidget(remove)
+        if self.mvp_mode:
+            self.tag_input.hide()
+            add.hide()
+            remove.hide()
         form.addLayout(tags_row)
         self.tags = QListWidget()
         self.tags.setMaximumHeight(90)
         form.addWidget(self.tags)
+        if self.mvp_mode:
+            self.tags.hide()
         commands = QHBoxLayout()
         self.save_button = QPushButton('手动保存（Ctrl+S）')
         self.save_button.clicked.connect(self.save_current)
@@ -177,6 +186,8 @@ class EditorWindow(SavedPanel, StartupWindow):
         self.export_button = QPushButton('导出已保存 Markdown')
         self.export_button.clicked.connect(self.export_saved_note)
         commands.addWidget(self.export_button)
+        if self.mvp_mode:
+            self.export_button.hide()
         self.check_button = QPushButton('核实原保存命令')
         self.check_button.clicked.connect(self.check_pending)
         commands.addWidget(self.check_button)
@@ -201,6 +212,8 @@ class EditorWindow(SavedPanel, StartupWindow):
         pending.setWordWrap(True)
         right_layout.addWidget(pending)
         splitter.addWidget(right)
+        if self.mvp_mode:
+            right.hide()
         splitter.setSizes([240, 560, 360])
         layout.addWidget(splitter, 1)
         self.setCentralWidget(root)
@@ -210,30 +223,39 @@ class EditorWindow(SavedPanel, StartupWindow):
             self._draft_text_inputs[self._active_buffer] = text
 
     async def _close_collection_storage(self):
-        if self._storage_retire is not None:
-            await asyncio.to_thread(self._storage_retire.shutdown, wait=True)
         for adapter in self._storage_adapters:
             await asyncio.to_thread(adapter.close)
 
+    async def _prepare_collection_storage(self):
+        previous = await self.dispatcher.invoke(lambda: self._owned_storage)
+        if previous is not None:
+            # This activation awaits actual executor shutdown before its final
+            # Qt install. The runtime drains this task before finalizers run.
+            await asyncio.to_thread(previous.close)
+
+    def _restore_collection_storage(self):
+        previous = self._owned_storage
+        if previous is not None and previous._closed:
+            adapter = SqliteEditingStorage(previous.store)
+            self._storage_adapters.append(adapter)
+            self._owned_storage = self.editing.storage = adapter
+
     def _bind_collection_storage(self):
         previous = self._owned_storage
+        if previous is not None and not previous._closed:
+            raise RuntimeError('Previous collection storage must be closed before activation.')
         context = self.editing.context
         store = CollectionStore(Path(self.session.directory) / 'knowledge.sqlite',
                                 context.collection_id)
         adapter = SqliteEditingStorage(store)
-        # Keep every adapter under the already registered shutdown finalizer.
-        # Installing a collection must not submit new work during shutdown.
         self._storage_adapters.append(adapter)
         self._owned_storage = self.editing.storage = adapter
-        self.export_source = CExportSource(store)
-        from pmkb.desktop.markdown_preview import SharedMarkdownPreview
-        if isinstance(self.previews.renderer, SharedMarkdownPreview):
-            self.previews.renderer = SharedMarkdownPreview(store)
-        if previous is not None and self._storage_retire is not None:
-            try:
-                self._storage_retire.submit(previous.close)
-            except RuntimeError:
-                pass  # Shutdown finalizer still owns previous; never abandon it.
+        if not self.mvp_mode:
+            from pmkb.infrastructure.storage.export_source import CExportSource
+            from pmkb.desktop.markdown_preview import SharedMarkdownPreview
+            self.export_source = CExportSource(store)
+            if isinstance(self.previews.renderer, SharedMarkdownPreview):
+                self.previews.renderer = SharedMarkdownPreview(store)
 
     def _install_collection_view(self):
         """Final Qt activation boundary, not a later outcome presentation.
@@ -275,6 +297,10 @@ class EditorWindow(SavedPanel, StartupWindow):
         if selected is None:
             self._active_buffer = None
         active = self.editing.context.collection_id is not None
+        for button in self.collection_buttons:
+            button.setEnabled(not (self.mvp_mode and active))
+        if self.mvp_mode and active:
+            self.notice.setText('当前集合已打开；更换集合请先退出程序。标签、预览、引用和导出不在本轮交付范围。')
         self.location.setText(self.session.directory or '尚未打开集合')
         self.new_button.setEnabled(active and not self._exit_waiting and not self._switching)
         self.save_button.setEnabled(self._active_buffer is not None and not self.editing.busy
@@ -283,6 +309,8 @@ class EditorWindow(SavedPanel, StartupWindow):
         for widget in (self.name, self.body, self.tag_input, self.tags):
             widget.setEnabled(self._active_buffer is not None and not self._exit_waiting)
         view = self._current()
+        if self.mvp_mode:
+            self.name.setReadOnly(view is not None and view.snapshot.note_id is not None)
         self.export_button.setEnabled(self._can_export(view))
         self.export_button.setToolTip('请选择有保存版本的笔记。' if self.export_source is not None
                                      else '等待一致的保存版读取接口接入。')
@@ -557,6 +585,9 @@ class EditorWindow(SavedPanel, StartupWindow):
             self.open_collection(mode, directory)
 
     def open_collection(self, mode, directory):
+        if self.mvp_mode and self.editing.context.collection_id is not None:
+            self.statusBar().showMessage('请先退出当前程序，再打开另一个集合。')
+            return
         if self._exit_waiting or self._switching or self.editing.busy:
             return
         self._switching = True

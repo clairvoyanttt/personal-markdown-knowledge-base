@@ -70,7 +70,7 @@ def create_startup_window() -> StartupWindow:
     return window
 
 
-def create_main_window(config_file=None, storage=None, preview_renderer=None, *, export_source=None, use_collection_storage=False):
+def create_main_window(config_file=None, storage=None, preview_renderer=None, *, export_source=None, use_collection_storage=False, mvp_mode=False):
     # Import after StartupWindow exists: the editor extends its resource lifecycle.
     import os
     from pathlib import Path
@@ -78,12 +78,11 @@ def create_main_window(config_file=None, storage=None, preview_renderer=None, *,
     if config_file is None:
         config_file = Path(os.environ.get('LOCALAPPDATA', str(Path.home()))) / 'PersonalMarkdownKnowledgeBase' / 'collections.json'
     return EditorWindow(Path(config_file), storage, preview_renderer, export_source=export_source,
-                        use_collection_storage=use_collection_storage)
+                        use_collection_storage=use_collection_storage, mvp_mode=mvp_mode)
 
 
 def main() -> int:
     app = QApplication(sys.argv)
-    from pmkb.desktop.markdown_preview import SharedMarkdownPreview
-    window = create_main_window(preview_renderer=SharedMarkdownPreview(), use_collection_storage=True)
+    window = create_main_window(use_collection_storage=True, mvp_mode=True)
     window.show()
     return app.exec()

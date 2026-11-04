@@ -14,6 +14,8 @@ class EditorSession:
             raise ValueError('The editor view installer must be a synchronous callable.')
         self.editing, self.dispatcher = editing, dispatcher
         self._install_view = install_view
+        self.before_activate = None
+        self.activation_rejected = None
         self.directory: str | None = None
 
     @property
@@ -40,6 +42,13 @@ class EditorSession:
         return await self.editing.save_note(SaveNoteRequest(context, secrets.token_hex(16), snapshot), cancel)
 
     async def activate(self, expected, target, expected_buffers, discard_ids, cancel_signals=()):
+        if self.before_activate is not None:
+            try:
+                await self.before_activate()
+            except BaseException:
+                if self.activation_rejected is not None:
+                    await self.dispatcher.invoke(self.activation_rejected)
+                raise
         def install():
             context = self.editing.install_collection(expected, target, expected_buffers,
                                                       discard_ids, cancel_signals)
@@ -50,5 +59,7 @@ class EditorSession:
                 # the coordinator receives the installed context. No post/await.
                 if self._install_view is not None:
                     self._install_view()
+            elif self.activation_rejected is not None:
+                self.activation_rejected()
             return context
         return await self.dispatcher.invoke(install)

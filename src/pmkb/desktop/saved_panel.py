@@ -31,7 +31,9 @@ class SavedPanel:
         button.clicked.connect(self.refresh_saved)
         layout.addWidget(button)
         self.saved_notes = QListWidget()
-        self.saved_notes.itemDoubleClicked.connect(self.open_saved_item)
+        self.saved_notes.itemClicked.connect(self.open_saved_item)
+        if not self.mvp_mode:
+            self.saved_notes.itemDoubleClicked.connect(self.open_saved_item)
         layout.addWidget(self.saved_notes)
         self.delete_button = QPushButton('删除选中保存版')
         self.delete_button.clicked.connect(self.delete_saved)
@@ -43,10 +45,19 @@ class SavedPanel:
         self.check_delete_button.clicked.connect(self.check_saved_delete)
         self.check_delete_button.hide()
         layout.addWidget(self.check_delete_button)
-        layout.addWidget(QLabel('保存版引用 / 反向引用'))
+        relations_label = QLabel('保存版引用 / 反向引用')
+        layout.addWidget(relations_label)
         self.saved_relations = QListWidget()
         self.saved_relations.itemDoubleClicked.connect(self.open_saved_item)
         layout.addWidget(self.saved_relations)
+        self.saved_state = QLabel('尚未打开集合')
+        self.saved_state.setWordWrap(True)
+        layout.addWidget(self.saved_state)
+        if self.mvp_mode:
+            for widget in (self.filter_input, self.delete_button, self.check_delete_button,
+                           insert, relations_label, self.saved_relations):
+                widget.hide()
+            button.setText('刷新保存版列表')
 
     def run_search(self):
         if not self.search_input.text().strip():
@@ -54,6 +65,7 @@ class SavedPanel:
             self.saved_notes.clear()
             self.saved_relations.clear()
             self.statusBar().showMessage('搜索内容不能为空或全为空白；旧搜索结果已清除。')
+            self.saved_state.setText('请输入搜索内容。')
             return
         self.refresh_saved()
 
@@ -75,6 +87,8 @@ class SavedPanel:
         except RuleViolation as error:
             self.statusBar().showMessage(f'{error.code}：{error.reason}')
             return
+        if self.mvp_mode:
+            tags = ()
         async def query(cancel):
             if keyword:
                 reply = await SavedQueryService(store).search(SearchRequest(context, token, keyword, tags), cancel)
@@ -83,6 +97,8 @@ class SavedPanel:
                 return result(context, ResultStatus.OK, (reply.value.hits, reply.value.collection_revision))
             # Empty keyword is list mode; filter-only mode uses saved summaries.
             def read():
+                if self.mvp_mode:
+                    return store.summaries(), None
                 captured = store.snapshot()
                 rows = tuple(row for row in captured.notes if set(tags) <= set(row.tags))
                 return rows, captured.collection_revision
@@ -99,11 +115,14 @@ class SavedPanel:
                 return
             if revision is not None:
                 self._saved_revision = revision
+            self.saved_state.setText(f'已找到 {len(rows)} 篇保存版笔记' if rows else '没有找到保存版笔记。')
             for row in rows:
                 item = QListWidgetItem(row.name)
+                item.setToolTip(f"已保存 · 修订 {row.revision}")
                 item.setData(Qt.ItemDataRole.UserRole, row.note_id)
                 item.setData(Qt.ItemDataRole.UserRole + 1, row.revision)
                 self.saved_notes.addItem(item)
+        self.saved_state.setText("正在读取保存版……")
         self._submit(query, ready)
 
     def open_saved_item(self, item):
@@ -114,6 +133,30 @@ class SavedPanel:
         if self._switching or self._exit_waiting or self.editing.external_busy:
             return
         context = self.editing.context
+        discard = None
+        current = self._current()
+        if (self.mvp_mode and current is not None and current.is_dirty
+                and current.snapshot.note_id != note_id):
+            from pmkb.contracts.collections import LeaveChoice
+            captured = current.snapshot
+            choice = self._ask_leave(current)
+            if context != self.editing.context or self._current() != current:
+                self.statusBar().showMessage('确认期间草稿已变化，请重新选择。')
+                return
+            if choice == LeaveChoice.CANCEL:
+                return
+            if choice == LeaveChoice.SAVE:
+                def saved(reply):
+                    self._show_result(reply)
+                    if reply.status == ResultStatus.OK:
+                        self.refresh_saved()
+                        selected = QListWidgetItem()
+                        selected.setData(Qt.ItemDataRole.UserRole, note_id)
+                        self.open_saved_item(selected)
+                self._submit(lambda cancel: self.session.save_buffer(captured.buffer_id,
+                             captured.edit_version, cancel), saved)
+                return
+            discard = captured
         self._reference_query = token = secrets.token_hex(16)
         adapter = self._owned_storage
         if adapter is None:
@@ -122,6 +165,8 @@ class SavedPanel:
             loaded = await self.editing.load_note(LoadNoteRequest(context, note_id), cancel)
             if loaded.status != ResultStatus.OK:
                 return loaded
+            if self.mvp_mode:
+                return result(context, ResultStatus.OK, (loaded.value, None))
             related = await SavedQueryService(adapter.store).load_saved_view(
                 SavedViewRequest(context, token, note_id), cancel)
             return result(context, ResultStatus.OK, (loaded.value, related))
@@ -132,9 +177,15 @@ class SavedPanel:
                 self._show_result(reply)
                 return
             view, related = reply.value
+            if discard is not None:
+                if not self.editing.discard_draft(context, discard.buffer_id, discard.edit_version):
+                    self.statusBar().showMessage('加载期间出现新输入，原草稿保留，请重新选择。')
+                    return
             self._active_buffer = view.snapshot.buffer_id
             self._refresh(refresh_text=True)
             self.saved_relations.clear()
+            if related is None:
+                return
             if related.status != ResultStatus.OK:
                 self._show_result(related)
                 return
