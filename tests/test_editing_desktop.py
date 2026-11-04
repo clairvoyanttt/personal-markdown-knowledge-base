@@ -454,11 +454,11 @@ class EditorDesktopTests(unittest.TestCase):
         first = self.save_production_note('first', 'first saved')
         second = self.save_production_note('second', 'second saved')
         self.assertFalse(self.window.preview.isVisible())
-        self.assertFalse(self.window.tags.isVisible())
+        self.assertTrue(self.window.tags.isVisible())
         self.assertFalse(self.window.export_button.isVisible())
         self.assertFalse(self.window.saved_relations.isVisible())
         self.assertFalse(self.window.delete_button.isVisible())
-        self.assertFalse(self.window.filter_input.isVisible())
+        self.assertTrue(self.window.filter_input.isVisible())
         self.assertIsNone(self.window.previews.renderer)
         self.assertIsNone(self.window.export_source)
         self.assertTrue(self.window.name.isReadOnly())
@@ -577,6 +577,124 @@ class EditorDesktopTests(unittest.TestCase):
             self.window.run_search()
             self.pump(lambda: self.window.runtime.pending_count == 0 and self.window.dispatcher.pending_count == 0)
             self.assertEqual(self.window.saved_notes.count(), 1)
+
+    def test_mvp_tags_saved_only_filter_and_failed_save(self):
+        from pmkb.infrastructure.storage.writing import CommitResult, CommitState
+        self.shutdown()
+        self.window = create_main_window(self.root / 'config' / 'collections.json',
+                                        use_collection_storage=True, mvp_mode=True)
+        self.window.show()
+        self.activate()
+        first = self.save_production_note('first', 'body one')
+        self.window.tag_input.setText('AI')
+        self.window.add_tag()
+        self.window.tag_input.setText('AI')
+        self.window.add_tag()
+        self.window.tag_input.setText('ai')
+        self.window.add_tag()
+        self.assertEqual(self.window._current().snapshot.tags, ('AI', 'ai'))
+        def filtered(tag):
+            self.window.search_input.clear()
+            self.window.filter_input.setText(tag)
+            self.window.refresh_saved()
+            self.pump(lambda: self.window.runtime.pending_count == 0 and self.window.dispatcher.pending_count == 0)
+            return self.window.saved_notes.count()
+        self.assertEqual(filtered('AI'), 0)
+        store = self.window._owned_storage.store
+        with patch.object(store, 'save', return_value=CommitResult(CommitState.NOT_COMMITTED, None, None)):
+            self.window.save_current()
+            self.pump(lambda: not self.window.editing.busy)
+        self.assertEqual(self.window._current().snapshot.tags, ('AI', 'ai'))
+        self.assertEqual(store.load_note(first.note_id).tags, ())
+        self.window.save_current()
+        self.pump(lambda: self.window._current().snapshot.base_revision == 2)
+        self.assertEqual(filtered('AI'), 1)
+        self.assertEqual(filtered('ai'), 1)
+        self.window.filter_input.clear()
+        self.save_production_note('second', 'body two')
+        self.window.tag_input.setText('other')
+        self.window.add_tag()
+        self.window.save_current()
+        self.pump(lambda: self.window._current().snapshot.base_revision == 2)
+        self.assertEqual(filtered('other'), 1)
+        self.assertEqual(self.window.saved_notes.item(0).text(), 'second')
+        self.window.tags.setCurrentRow(0)
+        self.window.remove_tag()
+        self.assertEqual(filtered('other'), 1)
+        self.window.save_current()
+        self.pump(lambda: self.window._current().snapshot.base_revision == 3)
+        self.assertEqual(filtered('other'), 0)
+        self.window.filter_input.clear()
+        for tag in ('', 'x'*31, '\tbad'):
+            self.window.tag_input.setText(tag)
+            self.window.add_tag()
+            self.assertEqual(self.window._current().snapshot.tags, ())
+        self.window.tag_input.setText('中'*30)
+        self.window.add_tag()
+        self.assertEqual(self.window._current().snapshot.tags, ('中'*30,))
+        self.window.tags.setCurrentRow(0)
+        self.window.remove_tag()
+        for index in range(20):
+            self.window.tag_input.setText(f't{index}')
+            self.window.add_tag()
+        self.window.tag_input.setText('overflow')
+        self.window.add_tag()
+        self.assertEqual(len(self.window._current().snapshot.tags), 20)
+        self.assertEqual(self.window.tag_input.text(), 'overflow')
+
+    def test_mvp_saved_preview_switch_limit_and_heartbeat(self):
+        import asyncio
+        from threading import Event
+        self.shutdown()
+        self.window = create_main_window(self.root / 'config' / 'collections.json',
+            use_collection_storage=True, mvp_mode=True, enable_preview=True)
+        self.window.show()
+        self.activate()
+        self.assertTrue(self.window.preview.isVisible())
+        self.assertFalse(self.window.export_button.isVisible())
+        self.assertFalse(self.window.saved_relations.isVisible())
+        self.assertFalse(self.window.delete_button.isVisible())
+        body = '# Heading\n\nparagraph\n\n1. item\n\n[link](https://example.com)\n\n> quote\n\n```\n<x>\n```'
+        note = self.save_production_note('preview', body)
+        self.pump(lambda: 'Heading' in self.window.preview.toPlainText())
+        self.assertIn('<x>', self.window.preview.toPlainText())
+        self.assertEqual(self.window.body.toPlainText(), body)
+        self.window.body.setPlainText('UNSAVED_PRIVATE_TEXT')
+        self.pump(lambda: '未保存修改不更新预览' in self.window.preview.toPlainText())
+        self.assertIn('Heading', self.window.preview.toPlainText())
+        self.assertNotIn('UNSAVED_PRIVATE_TEXT', self.window.preview.toPlainText())
+        self.assertEqual(self.window._owned_storage.store.load_note(note.note_id).body, body)
+        self.window.body.setPlainText('x' * (200 * 1024 + 1))
+        self.window.save_current()
+        self.pump(lambda: self.window._current().snapshot.base_revision == 2)
+        self.pump(lambda: '超过 200 KB' in self.window.preview.toPlainText())
+        # Force a slow worker parse while Qt and the service loop keep running.
+        self.window.body.setPlainText('new saved content')
+        renderer = self.window.previews.renderer
+        started, release, heartbeat = Event(), Event(), Event()
+        real_render = renderer._render
+        def delayed(*args):
+            started.set()
+            release.wait(3)
+            return real_render(*args)
+        try:
+            with patch.object(renderer, '_render', side_effect=delayed):
+                self.window.save_current()
+                self.pump(lambda: self.window._current().snapshot.base_revision == 3)
+                self.pump(started.is_set)
+                from PySide6.QtCore import QTimer
+                QTimer.singleShot(0, heartbeat.set)
+                self.pump(heartbeat.is_set)
+                async def worker_heartbeat(cancel):
+                    return 1
+                handle = self.window.runtime.submit(worker_heartbeat)
+                self.pump(handle.outcome.done)
+                self.assertEqual(handle.outcome.result(), 1)
+                release.set()
+                self.pump(lambda: self.window.preview.toPlainText() == 'new saved content')
+        finally:
+            release.set()
+        self.assertEqual(self.window.body.toPlainText(), 'new saved content')
 
     def test_startup_has_no_config_write_or_fake_saved_rows(self):
         self.assertFalse((self.root / 'config').exists())

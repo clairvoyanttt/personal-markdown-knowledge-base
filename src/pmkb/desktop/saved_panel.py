@@ -54,10 +54,10 @@ class SavedPanel:
         self.saved_state.setWordWrap(True)
         layout.addWidget(self.saved_state)
         if self.mvp_mode:
-            for widget in (self.filter_input, self.delete_button, self.check_delete_button,
+            for widget in (self.delete_button, self.check_delete_button,
                            insert, relations_label, self.saved_relations):
                 widget.hide()
-            button.setText('刷新保存版列表')
+            button.setText('刷新保存版 / 应用标签')
 
     def run_search(self):
         if not self.search_input.text().strip():
@@ -87,8 +87,6 @@ class SavedPanel:
         except RuleViolation as error:
             self.statusBar().showMessage(f'{error.code}：{error.reason}')
             return
-        if self.mvp_mode:
-            tags = ()
         async def query(cancel):
             if keyword:
                 reply = await SavedQueryService(store).search(SearchRequest(context, token, keyword, tags), cancel)
@@ -97,7 +95,7 @@ class SavedPanel:
                 return result(context, ResultStatus.OK, (reply.value.hits, reply.value.collection_revision))
             # Empty keyword is list mode; filter-only mode uses saved summaries.
             def read():
-                if self.mvp_mode:
+                if self.mvp_mode and not tags:
                     return store.summaries(), None
                 captured = store.snapshot()
                 rows = tuple(row for row in captured.notes if set(tags) <= set(row.tags))

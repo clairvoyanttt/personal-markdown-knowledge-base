@@ -1,5 +1,5 @@
 """Qt editor consuming application services. Unavailable providers stay explicit."""
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 import secrets
 import asyncio
@@ -74,14 +74,19 @@ class CapturedExportSource:
 
 
 class EditorWindow(SavedPanel, StartupWindow):
-    def __init__(self, config_file: Path, storage=None, preview_renderer=None, *, export_source=None, use_collection_storage=False, mvp_mode=False):
+    def __init__(self, config_file: Path, storage=None, preview_renderer=None, *, export_source=None, use_collection_storage=False, mvp_mode=False, enable_preview=False):
         config_file = Path(config_file)
         if not config_file.is_absolute():
             raise ValueError('The application must supply an absolute configuration path.')
         super().__init__()
         self.mvp_mode = mvp_mode
+        self.enable_preview = enable_preview
         if mvp_mode:
-            preview_renderer = export_source = None
+            export_source = None
+            preview_renderer = None
+            if enable_preview:
+                from pmkb.desktop.markdown_preview import SharedMarkdownPreview
+                preview_renderer = SharedMarkdownPreview()
         self.editing = EditingService(ActiveContextGate(), storage)
         self.session = EditorSession(self.editing, self.dispatcher,
                                      install_view=self._install_collection_view)
@@ -169,16 +174,10 @@ class EditorWindow(SavedPanel, StartupWindow):
         remove = QPushButton('移除选中标签')
         remove.clicked.connect(self.remove_tag)
         tags_row.addWidget(remove)
-        if self.mvp_mode:
-            self.tag_input.hide()
-            add.hide()
-            remove.hide()
         form.addLayout(tags_row)
         self.tags = QListWidget()
         self.tags.setMaximumHeight(90)
         form.addWidget(self.tags)
-        if self.mvp_mode:
-            self.tags.hide()
         commands = QHBoxLayout()
         self.save_button = QPushButton('手动保存（Ctrl+S）')
         self.save_button.clicked.connect(self.save_current)
@@ -201,18 +200,21 @@ class EditorWindow(SavedPanel, StartupWindow):
         splitter.addWidget(center)
         right = QWidget()
         right_layout = QVBoxLayout(right)
-        right_layout.addWidget(QLabel('当前草稿预览'))
+        right_layout.addWidget(QLabel('已保存版本预览' if self.mvp_mode else '当前草稿预览'))
         self.preview = LocalPreview()
         self.preview.setOpenLinks(False)
         self.preview.setOpenExternalLinks(False)
-        self.preview.setPlainText('等待 C 的统一解析接口；尚未实现六类 Markdown 预览验收。')
+        self.preview.setPlainText('打开保存版笔记后显示预览。' if self.mvp_mode else '等待 C 的统一解析接口；尚未实现六类 Markdown 预览验收。')
         right_layout.addWidget(self.preview)
-        right_layout.addWidget(QLabel('保存版查询与引用位于左侧；导出使用已保存版本。'))
+        if not self.mvp_mode:
+            right_layout.addWidget(QLabel('保存版查询与引用位于左侧；导出使用已保存版本。'))
         pending = QLabel('备份与恢复界面尚未接入。未保存草稿不会作为保存版输出。')
         pending.setWordWrap(True)
         right_layout.addWidget(pending)
-        splitter.addWidget(right)
         if self.mvp_mode:
+            pending.hide()
+        splitter.addWidget(right)
+        if self.mvp_mode and not self.enable_preview:
             right.hide()
         splitter.setSizes([240, 560, 360])
         layout.addWidget(splitter, 1)
@@ -256,6 +258,9 @@ class EditorWindow(SavedPanel, StartupWindow):
             self.export_source = CExportSource(store)
             if isinstance(self.previews.renderer, SharedMarkdownPreview):
                 self.previews.renderer = SharedMarkdownPreview(store)
+        elif self.enable_preview:
+            from pmkb.desktop.markdown_preview import SharedMarkdownPreview
+            self.previews.renderer = SharedMarkdownPreview(store)
 
     def _install_collection_view(self):
         """Final Qt activation boundary, not a later outcome presentation.
@@ -300,7 +305,7 @@ class EditorWindow(SavedPanel, StartupWindow):
         for button in self.collection_buttons:
             button.setEnabled(not (self.mvp_mode and active))
         if self.mvp_mode and active:
-            self.notice.setText('当前集合已打开；更换集合请先退出程序。标签、预览、引用和导出不在本轮交付范围。')
+            self.notice.setText('当前集合已打开；更换集合请先退出程序。引用和导出不在本轮交付范围。')
         self.location.setText(self.session.directory or '尚未打开集合')
         self.new_button.setEnabled(active and not self._exit_waiting and not self._switching)
         self.save_button.setEnabled(self._active_buffer is not None and not self.editing.busy
@@ -553,6 +558,48 @@ class EditorWindow(SavedPanel, StartupWindow):
         if view is None or self._exit_waiting or self._closing:
             return
         s, context = view.snapshot, self.editing.context
+        if self.mvp_mode:
+            if not self.enable_preview or self._owned_storage is None:
+                return
+            if s.note_id is None or s.base_revision is None:
+                self.preview.setPlainText('请先保存笔记；预览仅显示已保存版本。')
+                return
+            store, renderer = self._owned_storage.store, self.previews.renderer
+            async def saved_preview(cancel):
+                from pmkb.application.editing.preview import PreviewContent
+                from pmkb.application.output_support import result
+                try:
+                    saved = await asyncio.to_thread(store.load_note, s.note_id)
+                    if cancel.is_set():
+                        return result(context, ResultStatus.CANCELLED)
+                    if saved is None:
+                        raise ValueError('保存版本不存在。')
+                    size = await asyncio.to_thread(lambda: len(saved.body.encode('utf-8')))
+                    if size > 200 * 1024:
+                        raise ValueError('保存版正文超过 200 KB，已跳过预览；仍可编辑和保存。')
+                    snapshot = replace(s, name=saved.name, body=saved.body, tags=saved.tags,
+                                       base_revision=saved.revision)
+                    html = await renderer.render(context, snapshot, cancel)
+                    if cancel.is_set():
+                        return result(context, ResultStatus.CANCELLED)
+                    if view.is_dirty:
+                        html = '<p>仅显示已保存版本；未保存修改不更新预览。</p>' + html
+                    return result(context, ResultStatus.OK,
+                                  PreviewContent(s.buffer_id, s.edit_version, html))
+                except Exception as error:
+                    from pmkb.contracts.common import AppError
+                    return result(context, ResultStatus.ERROR, error=AppError(
+                        'PREVIEW_UNAVAILABLE', str(error), '保存版预览不可用，编辑输入未改变。'))
+            def ready(reply):
+                current = self._current()
+                if current is None or current.snapshot != s:
+                    return
+                if reply.status == ResultStatus.ERROR:
+                    self.preview.setPlainText(reply.error.reason)
+                else:
+                    self._preview_ready(reply, (s.buffer_id, s.edit_version))
+            self._submit(saved_preview, ready)
+            return
         self._submit(lambda cancel: self.previews.preview(context, s.buffer_id, s.edit_version, cancel),
                      lambda result: self._preview_ready(result, (s.buffer_id, s.edit_version)))
 
