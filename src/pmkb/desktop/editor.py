@@ -169,16 +169,10 @@ class EditorWindow(SavedPanel, StartupWindow):
         remove = QPushButton('移除选中标签')
         remove.clicked.connect(self.remove_tag)
         tags_row.addWidget(remove)
-        if self.mvp_mode:
-            self.tag_input.hide()
-            add.hide()
-            remove.hide()
         form.addLayout(tags_row)
         self.tags = QListWidget()
         self.tags.setMaximumHeight(90)
         form.addWidget(self.tags)
-        if self.mvp_mode:
-            self.tags.hide()
         commands = QHBoxLayout()
         self.save_button = QPushButton('手动保存（Ctrl+S）')
         self.save_button.clicked.connect(self.save_current)
@@ -300,7 +294,7 @@ class EditorWindow(SavedPanel, StartupWindow):
         for button in self.collection_buttons:
             button.setEnabled(not (self.mvp_mode and active))
         if self.mvp_mode and active:
-            self.notice.setText('当前集合已打开；更换集合请先退出程序。标签、预览、引用和导出不在本轮交付范围。')
+            self.notice.setText('当前集合已打开；更换集合请先退出程序。引用和导出不在本轮交付范围。')
         self.location.setText(self.session.directory or '尚未打开集合')
         self.new_button.setEnabled(active and not self._exit_waiting and not self._switching)
         self.save_button.setEnabled(self._active_buffer is not None and not self.editing.busy
