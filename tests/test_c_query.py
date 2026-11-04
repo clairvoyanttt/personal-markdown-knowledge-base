@@ -349,5 +349,107 @@ class SavedViewSnapshotTests(QueryTestCase):
         self.assertFalse(thread.is_alive(), "the writer thread did not stop")
 
 
+class TagFilterTests(QueryTestCase):
+    def test_summaries_expose_saved_tags_only(self) -> None:
+        tagged = new_identifier()
+        untagged = new_identifier()
+        self.save(note_id=tagged, name="有标签", tags=("AI", "课程"))
+        self.save(note_id=untagged, name="无标签")
+
+        rows = {item.note_id: item for item in self.store.summaries()}
+        self.assertEqual(rows[tagged].tags, ("AI", "课程"))
+        self.assertEqual(rows[untagged].tags, ())
+
+    def test_summaries_tag_filter_is_and_and_case_sensitive(self) -> None:
+        upper = new_identifier()
+        lower = new_identifier()
+        both = new_identifier()
+        self.save(note_id=upper, name="大写标签篇", tags=("AI",))
+        self.save(note_id=lower, name="小写标签篇", tags=("ai",))
+        self.save(note_id=both, name="双标签", tags=("AI", "课程"))
+
+        self.assertEqual({item.note_id for item in self.store.summaries(tags=("AI",))}, {upper, both})
+        self.assertEqual({item.note_id for item in self.store.summaries(tags=("ai",))}, {lower})
+        self.assertEqual({item.note_id for item in self.store.summaries(tags=("AI", "课程"))}, {both})
+        self.assertEqual(self.store.summaries(tags=("不存在",)), ())
+
+    def test_summaries_filter_has_no_implicit_trim_or_fold(self) -> None:
+        self.save(name="AI 篇", tags=("AI",))
+        with self.assertRaises(RuleViolation) as error:
+            self.store.summaries(tags=(" AI ",))
+        self.assertEqual(error.exception.code, "INVALID_TAG")
+        # Case is not folded for tags: "ai" is a different tag, so no match.
+        self.assertEqual(self.store.summaries(tags=("ai",)), ())
+        self.assertEqual(len(self.store.summaries(tags=("AI", "AI"))), 1)
+
+    def test_search_combines_keyword_and_all_tags(self) -> None:
+        both = new_identifier()
+        ai_only = new_identifier()
+        course_only = new_identifier()
+        self.save(note_id=both, name="组合", body="知识管理", tags=("AI", "课程"))
+        self.save(note_id=ai_only, name="仅AI", body="知识管理", tags=("AI",))
+        self.save(note_id=course_only, name="仅课程", body="其他内容", tags=("课程",))
+
+        self.assertEqual({hit.note_id for hit in self.search("知识管理", ("AI", "课程")).hits}, {both})
+        self.assertEqual({hit.note_id for hit in self.search("知识管理", ("AI",)).hits}, {both, ai_only})
+        self.assertEqual(self.search("不存在", ("AI",)).hits, ())
+
+    def test_search_hits_expose_saved_tags(self) -> None:
+        note_id = new_identifier()
+        self.save(note_id=note_id, name="带标签标题", tags=("AI", "课程"))
+        reply = self.service.search_saved(SearchRequest(self.context, new_identifier(), "带标签标题"))
+        self.assertEqual(reply.hits[0].tags, ("AI", "课程"))
+
+    def test_tag_filter_is_collection_scoped(self) -> None:
+        other_db, other_id = new_collection(self.root, "other")
+        other_store = CollectionStore(other_db, other_id)
+        other_store.save(command_id=new_identifier(), operation_id=new_identifier(),
+                         note_id=new_identifier(), name="别的集合", body="同名标签",
+                         tags=("AI",), base_revision=None)
+        self.save(name="本集合", tags=("AI",))
+
+        self.assertEqual([item.name for item in self.store.summaries(tags=("AI",))], ["本集合"])
+
+    def test_tag_filter_uses_saved_state_after_update_and_delete(self) -> None:
+        note_id = new_identifier()
+        self.save(note_id=note_id, name="变更", tags=("AI",))
+        self.save(note_id=note_id, name="变更", tags=("课程",), base_revision=1)
+        self.assertEqual([item.name for item in self.store.summaries(tags=("课程",))], ["变更"])
+        self.assertEqual(self.store.summaries(tags=("AI",)), ())
+
+        self.store.delete(command_id=new_identifier(), operation_id=new_identifier(),
+                          note_id=note_id, expected_revision=2)
+        self.assertEqual(self.store.summaries(tags=("课程",)), ())
+
+
+class BacklinkScopeTests(QueryTestCase):
+    def test_foreign_marker_creates_no_backlink_in_this_collection(self) -> None:
+        local = new_identifier()
+        self.save(note_id=local, name="本地目标")
+        foreign = format_reference_marker("f" * 32, new_identifier())
+        self.save(name="来源", body=foreign)
+        self.assertEqual(self.store.backlinks(local), ())
+
+    def test_deleted_target_backlinks_still_list_saved_sources(self) -> None:
+        target = new_identifier()
+        source = new_identifier()
+        self.save(note_id=target, name="目标")
+        marker = format_reference_marker(self.collection_id, target)
+        self.save(note_id=source, name="来源", body=marker)
+        self.store.delete(command_id=new_identifier(), operation_id=new_identifier(),
+                          note_id=target, expected_revision=1)
+
+        self.assertEqual([item.note_id for item in self.store.backlinks(target)], [source])
+        resolved = self.store.classify(parse_markdown(marker, self.collection_id))
+        self.assertIs(resolved[0].state, ReferenceState.DELETED)
+
+    def test_backlinks_ignore_markers_inside_code(self) -> None:
+        target = new_identifier()
+        self.save(note_id=target, name="目标")
+        marker = format_reference_marker(self.collection_id, target)
+        self.save(name="代码示例", body=f"```\n{marker}\n```")
+        self.assertEqual(self.store.backlinks(target), ())
+
+
 if __name__ == "__main__":
     unittest.main()

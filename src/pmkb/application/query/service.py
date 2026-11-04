@@ -40,6 +40,7 @@ class SearchHit:
     note_id: str
     name: str
     revision: int
+    tags: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -133,7 +134,8 @@ class SavedQueryService:
             request.query_id,
             page.keyword,
             page.tags,
-            tuple(SearchHit(item.note_id, item.name, item.revision) for item in page.items),
+            tuple(SearchHit(item.note_id, item.name, item.revision, item.tags)
+                  for item in page.items),
             len(page.items),
             page.collection_revision,
         )
