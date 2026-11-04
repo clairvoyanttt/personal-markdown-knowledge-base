@@ -7,8 +7,10 @@
 | 交付 | 审查结论 | 入口 |
 |---|---|---|
 | D：保存版导出源取消与错误映射 | 当前 main+D 完整检查通过；本轮 PR CI 成功后已合并 PR #27 | [PR #27](https://github.com/clairvoyanttt/personal-markdown-knowledge-base/pull/27) / `feature/d-export-fix` |
-| C：引用面板、导出投影契约测试 | C-W2-REV-01 待修；暂不合并 | [PR #26](https://github.com/clairvoyanttt/personal-markdown-knowledge-base/pull/26) / `feature/c-ref-export-verify` |
-| B：保存版导出、引用展示与插入 | B-W2-REV-01 待修；暂不合并 | [PR #28](https://github.com/clairvoyanttt/personal-markdown-knowledge-base/pull/28) / `feature/b-wave2-export-references` |
+| C：引用面板、导出投影契约测试 | C-W2-REV-01 已修复，复审通过并合并 PR #26；见文末返修复审 | [PR #26](https://github.com/clairvoyanttt/personal-markdown-knowledge-base/pull/26) / `feature/c-ref-export-verify` |
+| B：保存版导出、引用展示与插入 | B-W2-REV-01 已修复，复审通过并合并 PR #28；见文末返修复审 | [PR #28](https://github.com/clairvoyanttt/personal-markdown-knowledge-base/pull/28) / `feature/b-wave2-export-references` |
+
+以下两项为首轮发现及返修要求的历史记录；当前已修复，复审结论见文末。
 
 ## C-W2-REV-01（P2）：跨集合测试仍断言旧异常类型
 
@@ -61,3 +63,19 @@
 ## 范围与验收边界
 
 第二波仍以显式 `--export`、`--references` 开启；预览独立使用 `--preview`，只显示保存版。引用只展示/插入，不承诺跳转、改名删除联动；备份恢复继续延期。7 条人工验收和 V01–V16 完整产品验收未执行，未据此更新为通过；最终冻结后再统一重建交付包和验收材料。
+
+
+## 返修复审通过与合并（2026-11-04）
+
+维护侧收到原分支追加返修后，重新直接进行 AI 技术检查，没有委派用户人工交叉复核。
+
+- **C-W2-REV-01 已修复。** C 保留跨集合拒绝用例，改为严格检查 `OutputFailure` 及 `error.exception.error.code == 'STALE_CONTEXT'`；报告已更新 D PR #27 的完成状态。当前 main+C 精确合并源码重新执行 `scripts/check.py`：635 项发现，633 通过、2 项 Windows 符号链接权限跳过，72.888 秒，exit 0。当前 head 两条 CI `41796768563`、`41796761831` 均 completed/success 后，PR #26 已按授权合并。
+- **B-W2-REV-01 已修复。** 列表、打开笔记、引用查询分别使用请求标识；列表刷新、筛选、搜索后重新查询当前保存版关系。新草稿和集合安装时清空；旧打开/关系请求不能覆盖当前选择。新增 6 项真实 Qt/临时 SQLite 回归覆盖刷新、无结果/非法输入、无引用笔记、新草稿、上下文交接及迟到响应，不改现有导出逻辑。
+- **独立原始复现场景重跑通过。** 同一来源笔记刷新前后都显示 `有效引用：target`，当前笔记未变，数据库关系仍为 1 条；不再出现旧版面板清空后不恢复的问题。
+- **本轮当前组合回归通过。** 当前 main+C+B（D 已合并）的精确源码重新执行 `scripts/check.py`：644 项发现、642 通过、2 项 Windows 符号链接权限跳过，78.096 秒，exit 0；旧异常类型错误消失。两项权限跳过不算通过，也不等于相关场景已在本机覆盖。
+- **Windows 原生第二波脚本通过。** 实际刷新、筛选和搜索后关系保留；引用插入/保存展示、保存前无反向关系、只输出保存版、拒绝覆盖、未保存草稿保留、运行时和存储关闭均 true。
+- B 当前 head PR/push CI `41797524303`、`41797515956` 均 completed/success，GitHub 在 C 合并后重新计算为可合并，再按用户授权合并 PR #28；保留 B/C 原作者提交。技术复审以 COMMENT 留档，不冒充用户人工批准。
+
+上述测试数字是本轮合并前精确源码验证结果；合并后实际主线的重新执行另记对应 PR 后续技术记录及交接记录，不将这组结果混称为另一次执行。私人证据目录：`D:\软件工程\.wave2-review-2026-11-04\round2`。
+
+**交付边界未变：** 第二波使用 `--export`/`--references` 显式开启，引用只展示/插入；默认最小入口、保存版预览及 200 KB 预览限制沿用原约定。引用导航、改名删除联动、备份恢复不开放。7 条人工验收、V01–V16 完整产品验收、最终 wheel 重建/干净安装及断网验收未据此完成。
