@@ -37,10 +37,28 @@ class SqliteEditingStorage:
         return self._store
 
     def close(self) -> None:
-        """Stop the storage thread after in-flight work; safe to call twice."""
+        """Stop the storage thread after in-flight work; safe to call twice.
+
+        New submissions are refused as soon as the close starts; the call returns
+        only after the owning storage thread has finished its queued work. Callers
+        on the Qt main thread must use :meth:`aclose` instead of blocking here.
+        """
         if not self._closed:
             self._closed = True
             self._executor.shutdown(wait=True)
+
+    async def aclose(self) -> None:
+        """Await completion of the storage thread without blocking the event loop.
+
+        B's serial collection rebind can await this between binding the old store
+        out and installing the new one (B-03), instead of fire-and-forget cleanup.
+        """
+        if self._closed:
+            return
+        self._closed = True
+        await asyncio.get_running_loop().run_in_executor(
+            None, lambda: self._executor.shutdown(wait=True)
+        )
 
     def __enter__(self) -> "SqliteEditingStorage":
         return self
