@@ -15,6 +15,7 @@ class SavedPanel:
         self._delete_attempt = None
         self._delete_running = False
         self._saved_query = None
+        self._open_query = None
         self._reference_query = None
         self._saved_revision = -1
         self.search_input = QLineEdit()
@@ -66,9 +67,9 @@ class SavedPanel:
 
     def run_search(self):
         if not self.search_input.text().strip():
-            self._saved_query = self._reference_query = None
+            self._saved_query = None
             self.saved_notes.clear()
-            self.saved_relations.clear()
+            self.refresh_relations()
             self.statusBar().showMessage('搜索内容不能为空或全为空白；旧搜索结果已清除。')
             self.saved_state.setText('请输入搜索内容。')
             return
@@ -76,11 +77,15 @@ class SavedPanel:
 
     def refresh_saved(self):
         self._saved_query = token = secrets.token_hex(16)
-        self._reference_query = None
+        # List filters do not change the current note. Keep its relations until
+        # a fresh query for that note is delivered; never cancel a note open.
         self.saved_notes.clear()
-        self.saved_relations.clear()
+        current = self._current()
+        if current is None or current.snapshot.note_id is None:
+            self.refresh_relations()  # Clear at the context/new-draft boundary.
         adapter = self._owned_storage
         if adapter is None or self._closing:
+            self.refresh_relations()
             return
         context = self.editing.context
         store = adapter.store
@@ -90,6 +95,7 @@ class SavedPanel:
         try:
             tags = normalize_tags(self.filter_input.text().split(',')) if self.filter_input.text() else ()
         except RuleViolation as error:
+            self.refresh_relations()
             self.statusBar().showMessage(f'{error.code}：{error.reason}')
             return
         async def query(cancel):
@@ -111,10 +117,12 @@ class SavedPanel:
             if token != self._saved_query:
                 return
             if reply.status != ResultStatus.OK:
+                self.refresh_relations()
                 self._show_result(reply)
                 return
             rows, revision = reply.value
             if revision is not None and revision < self._saved_revision:
+                self.refresh_saved()
                 return
             if revision is not None:
                 self._saved_revision = revision
@@ -125,6 +133,7 @@ class SavedPanel:
                 item.setData(Qt.ItemDataRole.UserRole, row.note_id)
                 item.setData(Qt.ItemDataRole.UserRole + 1, row.revision)
                 self.saved_notes.addItem(item)
+            self.refresh_relations()
         self.saved_state.setText("正在读取保存版……")
         self._submit(query, ready)
 
@@ -160,42 +169,25 @@ class SavedPanel:
                              captured.edit_version, cancel), saved)
                 return
             discard = captured
-        self._reference_query = token = secrets.token_hex(16)
+        self._open_query = token = secrets.token_hex(16)
         adapter = self._owned_storage
         if adapter is None:
             return
         async def load(cancel):
-            loaded = await self.editing.load_note(LoadNoteRequest(context, note_id), cancel)
-            if loaded.status != ResultStatus.OK:
-                return loaded
-            if self.mvp_mode and not self.enable_references:
-                return result(context, ResultStatus.OK, (loaded.value, None))
-            related = await SavedQueryService(adapter.store).load_saved_view(
-                SavedViewRequest(context, token, note_id), cancel)
-            return result(context, ResultStatus.OK, (loaded.value, related))
+            return await self.editing.load_note(LoadNoteRequest(context, note_id), cancel)
         def ready(reply):
-            if token != self._reference_query:
+            if token != self._open_query:
                 return
             if reply.status != ResultStatus.OK:
                 self._show_result(reply)
                 return
-            view, related = reply.value
             if discard is not None:
                 if not self.editing.discard_draft(context, discard.buffer_id, discard.edit_version):
                     self.statusBar().showMessage('加载期间出现新输入，原草稿保留，请重新选择。')
                     return
-            self._active_buffer = view.snapshot.buffer_id
+            self._active_buffer = reply.value.snapshot.buffer_id
             self._refresh(refresh_text=True)
-            self.saved_relations.clear()
-            if related is None:
-                return
-            if related.status != ResultStatus.OK:
-                self._show_result(related)
-                return
-            if related.value.collection_revision < self._saved_revision:
-                return
-            self._saved_revision = related.value.collection_revision
-            self._show_relations(related.value)
+            self.refresh_relations()
         self._submit(load, ready)
 
     def refresh_relations(self):
@@ -219,6 +211,7 @@ class SavedPanel:
                 self._show_result(reply)
                 return
             if reply.value.collection_revision < self._saved_revision:
+                self.refresh_relations()
                 return
             self._saved_revision = reply.value.collection_revision
             self._show_relations(reply.value)
@@ -306,7 +299,7 @@ class SavedPanel:
     def _run_saved_delete(self, checking):
         from pmkb.infrastructure.storage.writing import CommitState
         store, context, note_id, revision, command, operation = self._delete_attempt
-        self._reference_query = self._saved_query = None
+        self._open_query = self._reference_query = self._saved_query = None
         self._delete_running = self.editing.external_busy = True
         self.editing.external_pending = True
         self.centralWidget().setEnabled(False)

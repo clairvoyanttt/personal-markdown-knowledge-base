@@ -276,6 +276,7 @@ class EditorWindow(SavedPanel, StartupWindow):
         if self._use_collection_storage:
             self._bind_collection_storage()
         self._saved_revision = -1
+        self._open_query = None
         self._active_buffer = None
         self._draft_text_inputs.clear()
         self._preview_timer.stop()
@@ -354,6 +355,7 @@ class EditorWindow(SavedPanel, StartupWindow):
                 self.preview.setPlainText('请选择草稿。' if self.previews.renderer else '等待 C 的统一解析接口。')
 
     def _select_draft(self, item, previous=None):
+        self._open_query = None
         self._active_buffer = item.data(Qt.ItemDataRole.UserRole) if item else None
         self._refresh(refresh_text=True)
         self.refresh_relations()
@@ -361,6 +363,7 @@ class EditorWindow(SavedPanel, StartupWindow):
     def new_draft(self):
         if self._exit_waiting or self._switching:
             return
+        self._open_query = None
         result = self.editing.create(CreateDraftRequest(self.editing.context, ''))
         if result.status == ResultStatus.OK:
             self._active_buffer = result.value.snapshot.buffer_id

@@ -794,6 +794,222 @@ class EditorDesktopTests(unittest.TestCase):
         self.assertEqual(self.window._current().snapshot.note_id, target.note_id)
         self.assertFalse(self.window.export_button.isVisible())
 
+    def wave2_relation_fixture(self, *, mvp=True):
+        self.shutdown()
+        self.window = create_main_window(self.root / 'config' / 'collections.json',
+            use_collection_storage=True, mvp_mode=mvp, enable_references=True, enable_export=True)
+        self.window.show()
+        self.activate()
+        target = self.save_production_note('target', 'target body')
+        plain = self.save_production_note('plain', 'no references')
+        cid = self.window.editing.context.collection_id
+        valid = f'[[note:{cid}:{target.note_id}]]'
+        missing = f'[[note:{cid}:{"d"*32}]]'
+        foreign = f'[[note:{"f"*32}:{"e"*32}]]'
+        source = self.save_production_note('source', valid + ' ' + missing + ' ' + foreign)
+        self.window.tag_input.setText('topic')
+        self.window.add_tag()
+        self.window.save_current()
+        self.pump(lambda: self.window._current().snapshot.base_revision == 2)
+        self.pump(lambda: self.window.runtime.pending_count == 0 and self.window.dispatcher.pending_count == 0)
+        self.assertEqual(self.window.saved_relations.count(), 3)
+        return target, plain, source
+
+    def assert_current_source_relations(self, source):
+        self.pump(lambda: self.window.runtime.pending_count == 0 and self.window.dispatcher.pending_count == 0)
+        self.assertEqual(self.window._current().snapshot.note_id, source.note_id)
+        self.assertEqual(len(self.window._owned_storage.store.saved_view(source.note_id).references), 3)
+        self.assertEqual(self.window.saved_relations.count(), 3)
+        text = ' '.join(self.window.saved_relations.item(i).text() for i in range(3))
+        for expected in ('有效引用', '其他集合', '未知目标'):
+            self.assertIn(expected, text)
+
+    def test_wave2_refresh_filter_search_preserve_current_relations(self):
+        _, _, source = self.wave2_relation_fixture()
+        from PySide6.QtWidgets import QPushButton
+        button = next(b for b in self.window.findChildren(QPushButton)
+                      if b.text() == '刷新保存版 / 应用标签')
+        button.click()
+        self.assert_current_source_relations(source)
+        for tag in ('topic', 'not-matching'):
+            self.window.filter_input.setText(tag)
+            self.window.refresh_saved()
+            self.assert_current_source_relations(source)
+        self.window.filter_input.clear()
+        for keyword in ('source', 'no-result', '   ', ''):
+            self.window.search_input.setText(keyword)
+            self.window.run_search()
+            self.assert_current_source_relations(source)
+        self.window.filter_input.setText('\tbad')
+        self.window.refresh_saved()
+        self.assert_current_source_relations(source)
+
+    def test_wave2_delayed_relation_after_refresh_and_note_switch(self):
+        import asyncio
+        from threading import Event
+        from pmkb.application.query.service import SavedQueryService
+        _, plain, source = self.wave2_relation_fixture()
+        started, release = Event(), Event()
+        original = SavedQueryService.load_saved_view
+        held = False
+        async def delayed(service, request, cancel=None):
+            nonlocal held
+            reply = await original(service, request, cancel)
+            if request.note_id == source.note_id and not held:
+                held = True
+                started.set()
+                await asyncio.to_thread(release.wait, 5)
+            return reply
+        try:
+            with patch.object(SavedQueryService, 'load_saved_view', new=delayed):
+                self.window.refresh_relations()
+                self.pump(started.is_set)
+                self.window.refresh_saved()
+                self.pump(lambda: self.window.saved_relations.count() == 3)
+                item = next(self.window.saved_notes.item(i) for i in range(self.window.saved_notes.count())
+                            if self.window.saved_notes.item(i).text() == 'plain')
+                self.window.open_saved_item(item)
+                self.pump(lambda: self.window._current().snapshot.note_id == plain.note_id)
+                self.pump(lambda: self.window.saved_relations.count() == 0)
+                self.window.new_draft()
+                self.assertIsNone(self.window._current().snapshot.note_id)
+                release.set()
+                self.pump(lambda: self.window.runtime.pending_count == 0 and self.window.dispatcher.pending_count == 0)
+                self.assertEqual(self.window.saved_relations.count(), 0)
+                self.assertIsNone(self.window._current().snapshot.note_id)
+        finally:
+            release.set()
+
+    def test_wave2_delayed_relation_after_context_change(self):
+        import asyncio
+        from threading import Event
+        from pmkb.application.query.service import SavedQueryService
+        _, _, source = self.wave2_relation_fixture(mvp=False)
+        old_context = self.window.editing.context
+        started, release = Event(), Event()
+        original = SavedQueryService.load_saved_view
+        async def delayed(service, request, cancel=None):
+            reply = await original(service, request, cancel)
+            if request.note_id == source.note_id:
+                started.set()
+                await asyncio.to_thread(release.wait, 5)
+            return reply
+        try:
+            with patch.object(SavedQueryService, 'load_saved_view', new=delayed):
+                self.window.refresh_relations()
+                self.pump(started.is_set)
+                activated, held = self.window._activated, []
+                target = self.root / 'other-context'
+                target.mkdir()
+                try:
+                    with patch.object(self.window, '_activated', side_effect=held.append):
+                        self.window.open_collection(ActivationMode.CREATE, target)
+                        self.pump(lambda: bool(held))
+                        # Model installed, outcome withheld: no old-context panel.
+                        self.assertNotEqual(self.window.editing.context, old_context)
+                        self.assertIsNone(self.window._active_buffer)
+                        self.assertEqual(self.window.saved_relations.count(), 0)
+                finally:
+                    for reply in held:
+                        activated(reply)
+                release.set()
+                self.pump(lambda: self.window.runtime.pending_count == 0 and self.window.dispatcher.pending_count == 0)
+                self.assertEqual(self.window.saved_relations.count(), 0)
+                self.assertIsNone(self.window._current())
+        finally:
+            release.set()
+
+    def test_wave2_list_refresh_does_not_cancel_note_open_or_revive_old_selection(self):
+        import asyncio
+        from threading import Event
+        _, plain, source = self.wave2_relation_fixture()
+        original = self.window.editing.load_note
+        def item_for(note_id):
+            return next(self.window.saved_notes.item(i) for i in range(self.window.saved_notes.count())
+                        if self.window.saved_notes.item(i).data(Qt.ItemDataRole.UserRole) == note_id)
+        for note_id, choose_new in ((plain.note_id, False), (source.note_id, True)):
+            started, release = Event(), Event()
+            async def delayed(request, cancel=None):
+                reply = await original(request, cancel)
+                started.set()
+                await asyncio.to_thread(release.wait, 5)
+                return reply
+            try:
+                with patch.object(self.window.editing, 'load_note', side_effect=delayed):
+                    self.window.open_saved_item(item_for(note_id))
+                    self.pump(started.is_set)
+                    self.window.refresh_saved()
+                    if choose_new:
+                        self.window.new_draft()
+                    release.set()
+                    self.pump(lambda: self.window.runtime.pending_count == 0 and self.window.dispatcher.pending_count == 0)
+                self.assertEqual(self.window._current().snapshot.note_id,
+                                 None if choose_new else note_id)
+                self.assertEqual(self.window.saved_relations.count(), 0)
+            finally:
+                release.set()
+
+    def test_wave2_old_list_result_cannot_erase_current_relations(self):
+        from threading import Event
+        _, _, source = self.wave2_relation_fixture()
+        started, release = Event(), Event()
+        store = self.window._owned_storage.store
+        original = store.search
+        def delayed(**kwargs):
+            page = original(**kwargs)
+            if kwargs['keyword'] == 'source':
+                started.set()
+                release.wait(5)
+            return page
+        try:
+            with patch.object(store, 'search', side_effect=delayed):
+                self.window.search_input.setText('source')
+                self.window.run_search()
+                self.pump(started.is_set)
+                self.window.search_input.setText('no-result')
+                self.window.run_search()
+                self.pump(lambda: '没有找到' in self.window.saved_state.text())
+                self.pump(lambda: self.window.saved_relations.count() == 3)
+                release.set()
+                self.assert_current_source_relations(source)
+                self.assertEqual(self.window.saved_notes.count(), 0)
+        finally:
+            release.set()
+
+    def test_wave2_old_relations_cannot_replace_new_saved_relationships(self):
+        import asyncio
+        from threading import Event
+        from pmkb.application.query.service import SavedQueryService
+        _, _, source = self.wave2_relation_fixture()
+        started, release = Event(), Event()
+        original = SavedQueryService.load_saved_view
+        held = False
+        async def delayed(service, request, cancel=None):
+            nonlocal held
+            reply = await original(service, request, cancel)
+            if not held:
+                held = True
+                started.set()
+                await asyncio.to_thread(release.wait, 5)
+            return reply
+        try:
+            with patch.object(SavedQueryService, 'load_saved_view', new=delayed):
+                self.window.refresh_relations()
+                self.pump(started.is_set)
+                cid = self.window.editing.context.collection_id
+                self.window.body.setPlainText(f'[[note:{cid}:{"d"*32}]]')
+                self.window.save_current()
+                self.pump(lambda: self.window._current().snapshot.base_revision == 3)
+                self.pump(lambda: self.window.saved_relations.count() == 1)
+                self.window.refresh_saved()
+                release.set()
+                self.pump(lambda: self.window.runtime.pending_count == 0 and self.window.dispatcher.pending_count == 0)
+            self.assertEqual(self.window.saved_relations.count(), 1)
+            self.assertIn('未知目标', self.window.saved_relations.item(0).text())
+            self.assertEqual(len(self.window._owned_storage.store.saved_view(source.note_id).references), 1)
+        finally:
+            release.set()
+
     def test_startup_has_no_config_write_or_fake_saved_rows(self):
         self.assertFalse((self.root / 'config').exists())
         self.assertFalse(self.window.new_button.isEnabled())

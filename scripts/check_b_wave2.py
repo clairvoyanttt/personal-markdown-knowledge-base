@@ -9,7 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'tests'))
 from test_editing_desktop import EditorDesktopTests
 from pmkb.desktop.app import create_main_window
 from PySide6.QtCore import QTimer
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QPushButton
 output = Path('artifacts/b-wave2').resolve()
 output.mkdir(parents=True, exist_ok=True)
 EditorDesktopTests.setUpClass()
@@ -32,6 +32,26 @@ try:
     w.save_current()
     case.pump(lambda: w._current().snapshot.base_revision == 2 and w.saved_relations.count() == 1)
     case.assertIn('目标笔记', w.saved_relations.item(0).text())
+    refresh = next(b for b in w.findChildren(QPushButton)
+                   if b.text() == '刷新保存版 / 应用标签')
+    refresh.click()
+    case.pump(lambda: w.runtime.pending_count == 0 and w.dispatcher.pending_count == 0)
+    case.assertEqual(w.saved_relations.count(), 1)
+    w.filter_input.setText('no-matching-tag')
+    refresh.click()
+    case.pump(lambda: w.runtime.pending_count == 0 and w.dispatcher.pending_count == 0)
+    case.assertEqual(w.saved_notes.count(), 0)
+    case.assertEqual(w.saved_relations.count(), 1)
+    w.filter_input.clear()
+    w.search_input.setText('no-matching-search')
+    w.run_search()
+    case.pump(lambda: w.runtime.pending_count == 0 and w.dispatcher.pending_count == 0)
+    case.assertEqual(w.saved_notes.count(), 0)
+    case.assertEqual(w.saved_relations.count(), 1)
+    w.search_input.clear()
+    refresh.click()
+    case.pump(lambda: w.runtime.pending_count == 0 and w.dispatcher.pending_count == 0)
+    case.assertEqual(w.saved_relations.count(), 1)
     w.grab().save(str(output/'saved-reference-panel.png'))
     w.body.setPlainText('未保存正文，不能进入导出文件')
     destination = case.root/'output.md'
@@ -56,6 +76,7 @@ try:
     case.assertEqual(w.body.toPlainText(), '未保存正文，不能进入导出文件')
     w.grab().save(str(output/'refused-overwrite.png'))
     facts = dict(reference_inserted=True, saved_reference_shown=True,
+                 refresh_filter_search_preserve_relations=True,
                  unsaved_reference_does_not_create_backlinks=True,
                  saved_only_export=True, overwrite_refused=True, dirty_input_retained=True,
                  deletion_hidden=not w.delete_button.isVisible(), qt_platform='windows')
