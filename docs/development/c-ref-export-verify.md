@@ -1,7 +1,7 @@
 # C：第二波引用/导出接口确认
 
 - 日期：2026-11-04
-- 分支：`feature/c-ref-export-verify`，基线 `862c356`（第一波已合并的 main）
+- 分支：`feature/c-ref-export-verify`（原基线 `862c356`，返修时合并最新 main，含 D PR #27）
 - 范围：FR06/FR07 引用与反向引用的**查询契约确认**、FR09 单篇导出的**已保存投影确认**
 - 定位：组件级真实 SQLite 自检，不是产品验收；不改 B/D 的 UI 与 `export_source.py`
 
@@ -13,7 +13,7 @@
 | FR07 反向引用 | 通过。`backlinks()` 只从保存版派生行读取，目标/来源/跨集合边界符合预期 |
 | 引用插入 | 通过。B 用 `format_reference_marker(collection_id, note_id)` 插入后保存，读回为 `VALID` 且目标出现反向引用 |
 | FR09 导出投影 | 通过。`SavedExportNote` 由 C 的一致视图映射，D 的 `_projection` 接受，四类引用渲染为 FR09 要求的文本 |
-| 取消/错误映射 | **仍需 D 修**：`export_source.py` 归 D，当前直接抛 `asyncio.CancelledError` / `StorageFailure`，需要映射为 D 的 `OutputFailure` 语义 |
+| 取消/错误映射 | 已由 D 完成（PR #27）：`export_source.py` 取消等待、`StorageFailure` → `OutputFailure` 映射、已有目标不覆盖。C 的契约测试已按 `OutputFailure` 断言（C-W2-REV-01） |
 
 ## 2. 引用/反向引用契约（给 B）
 
@@ -56,11 +56,14 @@ C 提供的数据（`saved_view` 映射为 `SavedExportNote`）：
 - 代码内标记不进入引用；无保存版返回 `None`（CB01）；过期上下文拒绝。
 - 跨度是 UTF-16 半开区间，切片等于完整标记。
 
-**D 仍需处理**（本 PR 不改 `export_source.py`）：
+**与 D 的接口对齐（C-W2-REV-01）**：
 
-- `read_saved` 取消时当前直接抛 `asyncio.CancelledError`，错误时抛 C 的 `StorageFailure`；
-  需要按 D 的端口约定映射为 `OutputFailure`/取消语义，避免被当成未知失败。
-- 若需要“导出取消后不覆盖已有文件”，仍由 D 的发布器保证；C 只读。
+- D 的 PR #27 已完成取消等待、`StorageFailure` → `OutputFailure` 映射和已有文件不覆盖；
+  `CExportSource.read_saved` 现在对跨集合上下文抛 `OutputFailure`，其 `.error.code == 'STALE_CONTEXT'`。
+- 本分支原先基于旧 main 自检时断言 `StorageFailure`，在 main+D 后已失效；现已改为
+  `assertRaises(OutputFailure)` 并严格断言错误码，跨集合拒绝用例保留。
+- 导出文件的写入与“已有目标拒绝覆盖”仍由 D 的发布器保证；C 只读。
+- 本节结论基于**含 D 修复的最新 main** 重新运行，不沿用旧基线结果。
 
 ## 4. 已知限制
 
@@ -77,5 +80,6 @@ C 提供的数据（`saved_view` 映射为 `SavedExportNote`）：
 ```
 
 - 新增契约测试：**10 项通过**（引用面板 6 项、导出投影 4 项）。
-- 全仓 `scripts/check.py`：**624 项发现、622 通过、2 项 Windows 符号链接权限（1314）跳过，
-  65.2 秒，exit code 0**。跳过的 2 项属于 D 的符号链接用例，不计为本分支通过。
+- 全仓 `scripts/check.py`（含 D PR #27 的最新 main 合并后）：**635 项发现、633 通过、
+  2 项 Windows 符号链接权限（1314）跳过，65.7 秒，exit code 0**。
+  跳过的 2 项属于 D 的符号链接用例，不计为本分支通过。此结果替代此前旧基线 624 项的自检结论。

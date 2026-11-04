@@ -14,12 +14,12 @@ from threading import Event
 
 from pmkb.application.export.rendering import ReferenceKind, render_export_markdown
 from pmkb.application.export.service import _projection
+from pmkb.application.output_support import OutputFailure
 from pmkb.contracts.collections import ActivationMode
 from pmkb.contracts.common import CallContext
 from pmkb.domain.identity import format_reference_marker, new_identifier
 from pmkb.domain.text_spans import slice_utf16
 from pmkb.infrastructure.storage.collection_catalog import LocalCollectionBackend
-from pmkb.infrastructure.storage.connection import StorageFailure
 from pmkb.infrastructure.storage.export_source import CExportSource
 from pmkb.infrastructure.storage.store import CollectionStore
 
@@ -94,10 +94,12 @@ class ExportProjectionTests(unittest.TestCase):
         self.assertIsNone(self.read(new_identifier()))
 
     def test_stale_context_is_rejected(self) -> None:
-        with self.assertRaises(StorageFailure) as error:
+        # D's export port maps the adapter failure to its own OutputFailure type
+        # (C-W2-REV-01); the cross-collection rejection itself still stands.
+        with self.assertRaises(OutputFailure) as error:
             asyncio.run(self.source.read_saved(CallContext(new_identifier(), 1),
                                                new_identifier(), Event()))
-        self.assertEqual(error.exception.code, "STALE_CONTEXT")
+        self.assertEqual(error.exception.error.code, "STALE_CONTEXT")
 
     def test_code_marker_is_not_exported_as_a_reference(self) -> None:
         target = new_identifier()
