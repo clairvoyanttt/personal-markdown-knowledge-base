@@ -3,7 +3,7 @@ import asyncio
 import secrets
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QLineEdit, QPushButton, QListWidget, QListWidgetItem, QLabel, QMessageBox
+from PySide6.QtWidgets import QLineEdit, QPushButton, QListWidget, QListWidgetItem, QLabel, QMessageBox, QInputDialog
 from pmkb.application.output_support import result
 from pmkb.application.query.service import SavedQueryService, SearchRequest, SavedViewRequest
 from pmkb.contracts.common import ResultStatus
@@ -15,6 +15,7 @@ class SavedPanel:
         self._delete_attempt = None
         self._delete_running = False
         self._saved_query = None
+        self._open_query = None
         self._reference_query = None
         self._saved_revision = -1
         self.search_input = QLineEdit()
@@ -38,32 +39,37 @@ class SavedPanel:
         self.delete_button = QPushButton('删除选中保存版')
         self.delete_button.clicked.connect(self.delete_saved)
         layout.addWidget(self.delete_button)
-        insert = QPushButton('将选中保存版插为引用')
+        insert = QPushButton('选择保存版插入引用')
+        self.insert_reference_button = insert
         insert.clicked.connect(self.insert_saved_reference)
         layout.addWidget(insert)
         self.check_delete_button = QPushButton('核实删除结果')
         self.check_delete_button.clicked.connect(self.check_saved_delete)
         self.check_delete_button.hide()
         layout.addWidget(self.check_delete_button)
-        relations_label = QLabel('保存版引用 / 反向引用')
+        relations_label = QLabel('保存版引用 / 反向引用（仅展示，不跳转）' if self.mvp_mode
+                                else '保存版引用 / 反向引用')
         layout.addWidget(relations_label)
         self.saved_relations = QListWidget()
-        self.saved_relations.itemDoubleClicked.connect(self.open_saved_item)
+        if not self.mvp_mode:
+            self.saved_relations.itemDoubleClicked.connect(self.open_saved_item)
         layout.addWidget(self.saved_relations)
         self.saved_state = QLabel('尚未打开集合')
         self.saved_state.setWordWrap(True)
         layout.addWidget(self.saved_state)
         if self.mvp_mode:
-            for widget in (self.delete_button, self.check_delete_button,
-                           insert, relations_label, self.saved_relations):
+            for widget in (self.delete_button, self.check_delete_button):
                 widget.hide()
+            if not self.enable_references:
+                for widget in (insert, relations_label, self.saved_relations):
+                    widget.hide()
             button.setText('刷新保存版 / 应用标签')
 
     def run_search(self):
         if not self.search_input.text().strip():
-            self._saved_query = self._reference_query = None
+            self._saved_query = None
             self.saved_notes.clear()
-            self.saved_relations.clear()
+            self.refresh_relations()
             self.statusBar().showMessage('搜索内容不能为空或全为空白；旧搜索结果已清除。')
             self.saved_state.setText('请输入搜索内容。')
             return
@@ -71,11 +77,15 @@ class SavedPanel:
 
     def refresh_saved(self):
         self._saved_query = token = secrets.token_hex(16)
-        self._reference_query = None
+        # List filters do not change the current note. Keep its relations until
+        # a fresh query for that note is delivered; never cancel a note open.
         self.saved_notes.clear()
-        self.saved_relations.clear()
+        current = self._current()
+        if current is None or current.snapshot.note_id is None:
+            self.refresh_relations()  # Clear at the context/new-draft boundary.
         adapter = self._owned_storage
         if adapter is None or self._closing:
+            self.refresh_relations()
             return
         context = self.editing.context
         store = adapter.store
@@ -85,6 +95,7 @@ class SavedPanel:
         try:
             tags = normalize_tags(self.filter_input.text().split(',')) if self.filter_input.text() else ()
         except RuleViolation as error:
+            self.refresh_relations()
             self.statusBar().showMessage(f'{error.code}：{error.reason}')
             return
         async def query(cancel):
@@ -106,10 +117,12 @@ class SavedPanel:
             if token != self._saved_query:
                 return
             if reply.status != ResultStatus.OK:
+                self.refresh_relations()
                 self._show_result(reply)
                 return
             rows, revision = reply.value
             if revision is not None and revision < self._saved_revision:
+                self.refresh_saved()
                 return
             if revision is not None:
                 self._saved_revision = revision
@@ -120,6 +133,7 @@ class SavedPanel:
                 item.setData(Qt.ItemDataRole.UserRole, row.note_id)
                 item.setData(Qt.ItemDataRole.UserRole + 1, row.revision)
                 self.saved_notes.addItem(item)
+            self.refresh_relations()
         self.saved_state.setText("正在读取保存版……")
         self._submit(query, ready)
 
@@ -155,62 +169,98 @@ class SavedPanel:
                              captured.edit_version, cancel), saved)
                 return
             discard = captured
-        self._reference_query = token = secrets.token_hex(16)
+        self._open_query = token = secrets.token_hex(16)
         adapter = self._owned_storage
         if adapter is None:
             return
         async def load(cancel):
-            loaded = await self.editing.load_note(LoadNoteRequest(context, note_id), cancel)
-            if loaded.status != ResultStatus.OK:
-                return loaded
-            if self.mvp_mode:
-                return result(context, ResultStatus.OK, (loaded.value, None))
-            related = await SavedQueryService(adapter.store).load_saved_view(
-                SavedViewRequest(context, token, note_id), cancel)
-            return result(context, ResultStatus.OK, (loaded.value, related))
+            return await self.editing.load_note(LoadNoteRequest(context, note_id), cancel)
         def ready(reply):
-            if token != self._reference_query:
+            if token != self._open_query:
                 return
             if reply.status != ResultStatus.OK:
                 self._show_result(reply)
                 return
-            view, related = reply.value
             if discard is not None:
                 if not self.editing.discard_draft(context, discard.buffer_id, discard.edit_version):
                     self.statusBar().showMessage('加载期间出现新输入，原草稿保留，请重新选择。')
                     return
-            self._active_buffer = view.snapshot.buffer_id
+            self._active_buffer = reply.value.snapshot.buffer_id
             self._refresh(refresh_text=True)
-            self.saved_relations.clear()
-            if related is None:
-                return
-            if related.status != ResultStatus.OK:
-                self._show_result(related)
-                return
-            if related.value.collection_revision < self._saved_revision:
-                return
-            self._saved_revision = related.value.collection_revision
-            for ref in related.value.references:
-                item = QListWidgetItem(f'{ref.state}: {ref.target_name or ref.marker_text}（{ref.reason}）')
-                if ref.navigable:
-                    item.setData(Qt.ItemDataRole.UserRole, ref.target_note_id)
-                self.saved_relations.addItem(item)
-            for ref in related.value.backlinks:
-                item = QListWidgetItem(f'反向引用：{ref.name}')
-                item.setData(Qt.ItemDataRole.UserRole, ref.note_id)
-                self.saved_relations.addItem(item)
+            self.refresh_relations()
         self._submit(load, ready)
 
-    def insert_saved_reference(self):
-        if self.editing.busy or self._switching or self._exit_waiting:
+    def refresh_relations(self):
+        if self.mvp_mode and not self.enable_references:
             return
-        item = self.saved_notes.currentItem()
-        if item is None or self._current() is None:
+        self._reference_query = token = secrets.token_hex(16)
+        self.saved_relations.clear()
+        view, adapter = self._current(), self._owned_storage
+        if view is None or view.snapshot.note_id is None or adapter is None or self._closing:
+            return
+        context, note_id = self.editing.context, view.snapshot.note_id
+        async def query(cancel):
+            return await SavedQueryService(adapter.store).load_saved_view(
+                SavedViewRequest(context, token, note_id), cancel)
+        def ready(reply):
+            current = self._current()
+            if (token != self._reference_query or current is None
+                    or current.snapshot.note_id != note_id):
+                return
+            if reply.status != ResultStatus.OK:
+                self._show_result(reply)
+                return
+            if reply.value.collection_revision < self._saved_revision:
+                self.refresh_relations()
+                return
+            self._saved_revision = reply.value.collection_revision
+            self._show_relations(reply.value)
+        self._submit(query, ready)
+
+    def _show_relations(self, saved):
+        self.saved_relations.clear()
+        for ref in saved.references:
+            labels = {
+                'VALID': f'有效引用：{ref.target_name}',
+                'DELETED': f'失效引用：{ref.target_name or "未知目标"}（目标已删除）',
+                'MISSING': '失效引用：未知目标（标识不存在或不可用）',
+                'FOREIGN_COLLECTION': '引用来自其他集合（无法跳转）',
+            }
+            item = QListWidgetItem(labels.get(ref.state, '失效引用：目标不可用'))
+            item.setToolTip(ref.marker_text + '\n' + ref.reason)
+            if ref.navigable and not self.mvp_mode:
+                item.setData(Qt.ItemDataRole.UserRole, ref.target_note_id)
+            self.saved_relations.addItem(item)
+        for ref in saved.backlinks:
+            item = QListWidgetItem(f'反向引用：{ref.name}')
+            if not self.mvp_mode:
+                item.setData(Qt.ItemDataRole.UserRole, ref.note_id)
+            self.saved_relations.addItem(item)
+
+    def insert_saved_reference(self):
+        if (self.editing.busy or self._switching or self._exit_waiting
+                or (self.mvp_mode and not self.enable_references)):
+            return
+        captured = self._current()
+        if captured is None or self.saved_notes.count() == 0:
+            return
+        context = self.editing.context
+        targets = [(self.saved_notes.item(i).text(),
+                    self.saved_notes.item(i).data(Qt.ItemDataRole.UserRole))
+                   for i in range(self.saved_notes.count())]
+        label, accepted = QInputDialog.getItem(self, '插入引用', '选择当前列表中的保存版目标：',
+                                               [name for name, _ in targets], 0, False)
+        if not accepted:
+            return
+        if (self._current() != captured or self.editing.context != context
+                or self.editing.busy or self._switching or self._exit_waiting):
+            self.statusBar().showMessage('选择期间草稿或集合已变化，请重新插入。')
+            return
+        note_id = next((nid for name, nid in targets if name == label), None)
+        if note_id is None:
             return
         from pmkb.domain.identity import format_reference_marker
-        marker = format_reference_marker(self.editing.context.collection_id,
-                                         item.data(Qt.ItemDataRole.UserRole))
-        self.body.textCursor().insertText(marker)
+        self.body.textCursor().insertText(format_reference_marker(context.collection_id, note_id))
 
     def delete_saved(self):
         if (self._owned_storage is None or self.editing.busy or self.editing.has_unconfirmed_save
@@ -249,7 +299,7 @@ class SavedPanel:
     def _run_saved_delete(self, checking):
         from pmkb.infrastructure.storage.writing import CommitState
         store, context, note_id, revision, command, operation = self._delete_attempt
-        self._reference_query = self._saved_query = None
+        self._open_query = self._reference_query = self._saved_query = None
         self._delete_running = self.editing.external_busy = True
         self.editing.external_pending = True
         self.centralWidget().setEnabled(False)
