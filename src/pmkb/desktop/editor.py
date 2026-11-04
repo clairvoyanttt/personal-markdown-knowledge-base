@@ -74,15 +74,18 @@ class CapturedExportSource:
 
 
 class EditorWindow(SavedPanel, StartupWindow):
-    def __init__(self, config_file: Path, storage=None, preview_renderer=None, *, export_source=None, use_collection_storage=False, mvp_mode=False, enable_preview=False):
+    def __init__(self, config_file: Path, storage=None, preview_renderer=None, *, export_source=None, use_collection_storage=False, mvp_mode=False, enable_preview=False, enable_export=False, enable_references=False):
         config_file = Path(config_file)
         if not config_file.is_absolute():
             raise ValueError('The application must supply an absolute configuration path.')
         super().__init__()
         self.mvp_mode = mvp_mode
         self.enable_preview = enable_preview
+        self.enable_export = enable_export
+        self.enable_references = enable_references
         if mvp_mode:
-            export_source = None
+            if not enable_export:
+                export_source = None
             preview_renderer = None
             if enable_preview:
                 from pmkb.desktop.markdown_preview import SharedMarkdownPreview
@@ -185,7 +188,7 @@ class EditorWindow(SavedPanel, StartupWindow):
         self.export_button = QPushButton('导出已保存 Markdown')
         self.export_button.clicked.connect(self.export_saved_note)
         commands.addWidget(self.export_button)
-        if self.mvp_mode:
+        if self.mvp_mode and not self.enable_export:
             self.export_button.hide()
         self.check_button = QPushButton('核实原保存命令')
         self.check_button.clicked.connect(self.check_pending)
@@ -252,7 +255,7 @@ class EditorWindow(SavedPanel, StartupWindow):
         adapter = SqliteEditingStorage(store)
         self._storage_adapters.append(adapter)
         self._owned_storage = self.editing.storage = adapter
-        if not self.mvp_mode:
+        if not self.mvp_mode or self.enable_export:
             from pmkb.infrastructure.storage.export_source import CExportSource
             from pmkb.desktop.markdown_preview import SharedMarkdownPreview
             self.export_source = CExportSource(store)
@@ -305,7 +308,7 @@ class EditorWindow(SavedPanel, StartupWindow):
         for button in self.collection_buttons:
             button.setEnabled(not (self.mvp_mode and active))
         if self.mvp_mode and active:
-            self.notice.setText('当前集合已打开；更换集合请先退出程序。引用和导出不在本轮交付范围。')
+            self.notice.setText('当前集合已打开；更换集合请先退出程序。额外功能仅作开发自检，不代表正式验收。')
         self.location.setText(self.session.directory or '尚未打开集合')
         self.new_button.setEnabled(active and not self._exit_waiting and not self._switching)
         self.save_button.setEnabled(self._active_buffer is not None and not self.editing.busy
@@ -353,6 +356,7 @@ class EditorWindow(SavedPanel, StartupWindow):
     def _select_draft(self, item, previous=None):
         self._active_buffer = item.data(Qt.ItemDataRole.UserRole) if item else None
         self._refresh(refresh_text=True)
+        self.refresh_relations()
 
     def new_draft(self):
         if self._exit_waiting or self._switching:
@@ -362,6 +366,7 @@ class EditorWindow(SavedPanel, StartupWindow):
             self._active_buffer = result.value.snapshot.buffer_id
         self._show_result(result)
         self._refresh(refresh_text=True)
+        self.refresh_relations()
 
     def _apply_text(self, *unused):
         view = self._current()
@@ -452,6 +457,8 @@ class EditorWindow(SavedPanel, StartupWindow):
             self.statusBar().showMessage('操作完成。' if result.status == ResultStatus.OK else '操作已取消。')
 
     def _can_export(self, view):
+        if self.mvp_mode and not self.enable_export:
+            return False
         return bool(self.export_source is not None and view
                     and view.snapshot.note_id is not None
                     and view.snapshot.base_revision is not None
@@ -544,6 +551,7 @@ class EditorWindow(SavedPanel, StartupWindow):
     def _saved(self, result):
         self._show_result(result)
         self.refresh_saved()
+        self.refresh_relations()
         if result.status == ResultStatus.OK and isinstance(result.value, CommitCheckReply):
             if result.value.state == CommitCheckState.NOT_COMMITTED:
                 self.statusBar().showMessage('核实完成：原保存已确认未提交；草稿保留，可手动重新保存。')

@@ -696,6 +696,104 @@ class EditorDesktopTests(unittest.TestCase):
             release.set()
         self.assertEqual(self.window.body.toPlainText(), 'new saved content')
 
+    def test_wave2_reference_insert_display_and_saved_export(self):
+        self.shutdown()
+        self.window = create_main_window(self.root / 'config' / 'collections.json',
+            use_collection_storage=True, mvp_mode=True, enable_export=True, enable_references=True)
+        self.window.show()
+        self.activate()
+        self.assertTrue(self.window.export_button.isVisible())
+        self.assertTrue(self.window.saved_relations.isVisible())
+        self.assertFalse(self.window.delete_button.isVisible())
+        self.assertFalse(self.window.preview.isVisible())
+        target = self.save_production_note('target', 'target body')
+        source = self.save_production_note('source', 'source body ')
+        with patch('pmkb.desktop.saved_panel.QInputDialog.getItem', return_value=('target', True)):
+            self.window.insert_reference_button.click()
+        marker = f'[[note:{self.window.editing.context.collection_id}:{target.note_id}]]'
+        self.assertIn(marker, self.window.body.toPlainText())
+        self.assertEqual(self.window._owned_storage.store.backlinks(target.note_id), ())
+        self.window.save_current()
+        self.pump(lambda: self.window._current().snapshot.base_revision == 2)
+        self.pump(lambda: self.window.saved_relations.count() == 1)
+        self.assertIn('target', self.window.saved_relations.item(0).text())
+        self.assertIsNone(self.window.saved_relations.item(0).data(Qt.ItemDataRole.UserRole))
+        saved_body = self.window._current().snapshot.body
+        self.window.body.setPlainText('UNSAVED_EXPORT_TEXT')
+        destination = self.root / 'wave2.md'
+        def accept(dialog):
+            dialog.buttons()[0].click()
+        with patch.object(QMessageBox, 'exec', accept), \
+             patch('pmkb.desktop.editor.QFileDialog.getSaveFileName', return_value=(str(destination), '')):
+            self.window.export_button.click()
+            self.pump(lambda: destination.exists())
+            self.pump(lambda: self.window.runtime.pending_count == 0 and self.window.dispatcher.pending_count == 0)
+            data = destination.read_text(encoding='utf-8')
+            self.assertIn('target', data)
+            self.assertNotIn(marker, data)
+            self.assertNotIn('UNSAVED_EXPORT_TEXT', data)
+            self.window.export_button.click()
+            self.pump(lambda: 'TARGET_EXISTS' in self.window.statusBar().currentMessage())
+        self.assertEqual(destination.read_text(encoding='utf-8'), data)
+        self.assertEqual(self.window.body.toPlainText(), 'UNSAVED_EXPORT_TEXT')
+        self.assertEqual(self.window._owned_storage.store.load_note(source.note_id).body, saved_body)
+
+    def test_wave2_reference_selection_change_is_rejected_and_export_error_visible(self):
+        from pmkb.infrastructure.storage.connection import StorageFailure
+        self.shutdown()
+        self.window = create_main_window(self.root / 'config' / 'collections.json',
+            use_collection_storage=True, mvp_mode=True, enable_export=True, enable_references=True)
+        self.window.show()
+        self.activate()
+        self.save_production_note('target', 'body')
+        source = self.save_production_note('source', 'initial')
+        def changed(*args):
+            self.window.body.setPlainText('new input during picker')
+            return 'target', True
+        with patch('pmkb.desktop.saved_panel.QInputDialog.getItem', side_effect=changed):
+            self.window.insert_saved_reference()
+        self.assertEqual(self.window.body.toPlainText(), 'new input during picker')
+        def accept(dialog):
+            dialog.buttons()[0].click()
+        with patch.object(QMessageBox, 'exec', accept), \
+             patch.object(self.window._owned_storage.store, 'saved_view',
+                          side_effect=StorageFailure('IO_FAILURE', 'controlled read failure')), \
+             patch('pmkb.desktop.editor.QFileDialog.getSaveFileName') as chooser:
+            self.window.export_saved_note()
+            self.pump(lambda: self.window.runtime.pending_count == 0 and self.window.dispatcher.pending_count == 0)
+            chooser.assert_not_called()
+        self.assertIn('IO_FAILURE', self.window.statusBar().currentMessage())
+        self.assertEqual(self.window._owned_storage.store.load_note(source.note_id).body, 'initial')
+
+    def test_wave2_reference_panel_saved_only_and_backlinks_without_navigation(self):
+        self.shutdown()
+        self.window = create_main_window(self.root / 'config' / 'collections.json',
+            use_collection_storage=True, mvp_mode=True, enable_references=True)
+        self.window.show()
+        self.activate()
+        target = self.save_production_note('target', 'target body')
+        cid = self.window.editing.context.collection_id
+        valid = f'[[note:{cid}:{target.note_id}]]'
+        foreign = f'[[note:{"f"*32}:{"e"*32}]]'
+        missing = f'[[note:{cid}:{"d"*32}]]'
+        source = self.save_production_note('source', valid + ' ' + foreign + ' ' + missing + '\n`' + valid + '`')
+        self.pump(lambda: self.window.saved_relations.count() == 3)
+        text = ' '.join(self.window.saved_relations.item(i).text() for i in range(3))
+        for state in ('有效引用', '其他集合', '未知目标'):
+            self.assertIn(state, text)
+        self.window.body.setPlainText('unsaved removal')
+        self.assertEqual(self.window.saved_relations.count(), 3)
+        item = next(self.window.saved_notes.item(i) for i in range(self.window.saved_notes.count())
+                    if self.window.saved_notes.item(i).text() == 'target')
+        with patch.object(self.window, '_ask_leave', return_value=LeaveChoice.DISCARD):
+            self.window.open_saved_item(item)
+            self.pump(lambda: self.window._current().snapshot.note_id == target.note_id)
+            self.pump(lambda: self.window.saved_relations.count() == 1)
+        self.assertIn('source', self.window.saved_relations.item(0).text())
+        self.window.saved_relations.itemDoubleClicked.emit(self.window.saved_relations.item(0))
+        self.assertEqual(self.window._current().snapshot.note_id, target.note_id)
+        self.assertFalse(self.window.export_button.isVisible())
+
     def test_startup_has_no_config_write_or_fake_saved_rows(self):
         self.assertFalse((self.root / 'config').exists())
         self.assertFalse(self.window.new_button.isEnabled())
