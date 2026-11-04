@@ -189,6 +189,395 @@ class EditorDesktopTests(unittest.TestCase):
         self.assertTrue(cancelled.is_set())
         self.assertFalse(destination.exists())
 
+    def test_production_storage_and_preview_on_real_collection(self):
+        from pmkb.desktop.markdown_preview import SharedMarkdownPreview
+        self.shutdown()
+        self.window = create_main_window(self.root / 'config' / 'collections.json',
+            preview_renderer=SharedMarkdownPreview(), use_collection_storage=True)
+        self.window.show()
+        self.activate()
+        self.window.new_draft()
+        self.window.name.setText('saved')
+        self.window._apply_name()
+        self.window.body.setPlainText('# title\n\n> quote\n\n- item\n\ntext `code` <img src=x>\n\n```\n<tag>\n```')
+        self.window.save_current()
+        self.pump(lambda: self.window._current().snapshot.base_revision == 1)
+        self.pump(lambda: '<img src=x>' in self.window.preview.toPlainText())
+        old = self.window._owned_storage
+        self.activate('second')
+        self.assertIn(old, self.window._storage_adapters)
+        self.assertIsNot(self.window.editing.storage, old)
+        self.assertFalse(self.window.editing.views())
+
+    def test_storage_rebind_needs_no_runtime_submit_and_finalizer_closes_all(self):
+        import asyncio
+        self.activate()
+        self.window._bind_collection_storage()
+        first = self.window._owned_storage
+        first.close()
+        with patch.object(self.window.runtime, 'submit', side_effect=RuntimeError('closed')) as submit:
+            self.window._bind_collection_storage()
+            submit.assert_not_called()
+        second = self.window._owned_storage
+        self.assertIs(self.window.editing.storage, second)
+        self.assertIsNot(first, second)
+        asyncio.run(self.window._close_collection_storage())
+        self.assertTrue(first._closed)
+        self.assertTrue(second._closed)
+
+    def test_saved_list_search_reopen_and_real_export_source(self):
+        import asyncio
+        from threading import Event
+        self.shutdown()
+        self.window = create_main_window(self.root / 'config' / 'collections.json',
+                                        use_collection_storage=True)
+        self.window.show()
+        self.activate()
+        self.window.new_draft()
+        self.window.name.setText('searchable')
+        self.window._apply_name()
+        self.window.body.setPlainText('saved content')
+        self.window.save_current()
+        self.pump(lambda: self.window._current().snapshot.base_revision == 1)
+        self.pump(lambda: self.window.saved_notes.count() == 1)
+        note_id = self.window._current().snapshot.note_id
+        self.window.body.setPlainText('unsaved input')
+        self.window.open_saved_item(self.window.saved_notes.item(0))
+        self.pump(lambda: self.window.runtime.pending_count == 0 and self.window.dispatcher.pending_count == 0)
+        self.assertEqual(self.window.body.toPlainText(), 'unsaved input')
+        saved = asyncio.run(self.window.export_source.read_saved(self.window.editing.context, note_id, Event()))
+        self.assertEqual(saved.saved_body, 'saved content')
+        self.window.search_input.setText('not found')
+        self.window.refresh_saved()
+        self.pump(lambda: self.window.runtime.pending_count == 0 and self.window.dispatcher.pending_count == 0)
+        self.assertEqual(self.window.saved_notes.count(), 0)
+
+    def production_window(self):
+        from pmkb.desktop.markdown_preview import SharedMarkdownPreview
+        self.shutdown()
+        self.window = create_main_window(self.root / 'config' / 'collections.json',
+            preview_renderer=SharedMarkdownPreview(), use_collection_storage=True)
+        self.window.show()
+        return self.activate()
+
+    def save_production_note(self, name, body):
+        self.window.new_draft()
+        self.window.name.setText(name)
+        self.window._apply_name()
+        self.window.body.setPlainText(body)
+        self.window.save_current()
+        self.pump(lambda: not self.window.editing.busy
+                  and self.window._current().snapshot.base_revision is not None)
+        self.pump(lambda: self.window.runtime.pending_count == 0 and self.window.dispatcher.pending_count == 0)
+        return self.window._current().snapshot
+
+    def test_real_delete_cancel_dirty_failure_and_unknown_commit_check(self):
+        from pmkb.infrastructure.storage.writing import CommitResult, CommitState
+        self.production_window()
+        note = self.save_production_note('delete target', 'body')
+        self.window.saved_notes.setCurrentRow(0)
+        with patch.object(QMessageBox, 'question', return_value=QMessageBox.StandardButton.Cancel):
+            self.window.delete_saved()
+        self.assertIsNotNone(self.window._owned_storage.store.load_note(note.note_id))
+        self.window.body.setPlainText('dirty input')
+        self.window.delete_saved()
+        self.assertIsNone(self.window._delete_attempt)
+        self.assertEqual(self.window.body.toPlainText(), 'dirty input')
+        self.window.save_current()
+        self.pump(lambda: not self.window.editing.busy and self.window._current().snapshot.base_revision == 2)
+        self.pump(lambda: self.window.runtime.pending_count == 0 and self.window.dispatcher.pending_count == 0)
+        store = self.window._owned_storage.store
+        self.window.saved_notes.setCurrentRow(0)
+        with patch.object(QMessageBox, 'question', return_value=QMessageBox.StandardButton.Yes), \
+             patch.object(store, 'delete', return_value=CommitResult(CommitState.NOT_COMMITTED, None, None)):
+            self.window.delete_saved()
+            self.pump(lambda: not self.window._delete_running)
+        self.assertIsNone(self.window._delete_attempt)
+        self.assertIsNotNone(store.load_note(note.note_id))
+        self.pump(lambda: self.window.runtime.pending_count == 0 and self.window.dispatcher.pending_count == 0)
+        self.window.saved_notes.setCurrentRow(0)
+        real = store.delete
+        def lost_receipt(**kwargs):
+            real(**kwargs)
+            return CommitResult(CommitState.UNRESOLVED, None, None)
+        with patch.object(QMessageBox, 'question', return_value=QMessageBox.StandardButton.Yes), \
+             patch.object(store, 'delete', side_effect=lost_receipt):
+            self.window.delete_saved()
+            self.pump(lambda: not self.window._delete_running)
+        self.assertTrue(self.window.editing.has_unconfirmed_save)
+        self.assertIsNotNone(self.window._current())  # Retained until evidence is confirmed.
+        self.window.new_draft()
+        self.assertEqual(len(self.window.editing.views()), 1)
+        self.window.check_saved_delete()
+        self.pump(lambda: self.window._delete_attempt is None)
+        self.assertFalse(self.window.editing.has_unconfirmed_save)
+        self.assertEqual(self.window.editing.views(), ())
+        self.assertIsNone(store.load_note(note.note_id))
+
+    def test_real_saved_references_backlinks_export_and_reopen(self):
+        first = self.production_window()
+        target = self.save_production_note('target', '# target')
+        context = self.window.editing.context
+        marker = f'[[note:{context.collection_id}:{target.note_id}]]'
+        source = self.save_production_note('source', 'reference ' + marker)
+        item = next(self.window.saved_notes.item(i) for i in range(self.window.saved_notes.count())
+                    if self.window.saved_notes.item(i).text() == 'source')
+        self.window.open_saved_item(item)
+        self.pump(lambda: self.window.saved_relations.count() == 1)
+        self.assertIn('target', self.window.saved_relations.item(0).text())
+        self.window.open_saved_item(self.window.saved_relations.item(0))
+        self.pump(lambda: self.window._current().snapshot.note_id == target.note_id
+                  and self.window.saved_relations.count() == 1)
+        self.assertIn('source', self.window.saved_relations.item(0).text())
+        destination = self.root / 'real-export.md'
+        def accept(dialog):
+            dialog.buttons()[0].click()
+        with patch.object(QMessageBox, 'exec', accept), \
+             patch('pmkb.desktop.editor.QFileDialog.getSaveFileName', return_value=(str(destination), '')):
+            self.window.export_saved_note()
+            self.pump(lambda: destination.exists())
+            self.pump(lambda: self.window.runtime.pending_count == 0 and self.window.dispatcher.pending_count == 0)
+        self.assertEqual(destination.read_text(encoding='utf-8'), '# target')
+        old = self.window._owned_storage
+        with patch.object(self.window, '_ask_leave', return_value=LeaveChoice.DISCARD):
+            self.activate('other')
+        self.pump(lambda: old._closed)
+        self.window.open_collection(ActivationMode.OPEN, first)
+        self.pump(lambda: not self.window._switching and self.window.saved_notes.count() == 2)
+        item = next(self.window.saved_notes.item(i) for i in range(2)
+                    if self.window.saved_notes.item(i).text() == 'source')
+        self.window.open_saved_item(item)
+        self.pump(lambda: self.window._current() is not None and
+                  self.window._current().snapshot.note_id == source.note_id)
+        self.assertEqual(self.window.body.toPlainText(), 'reference ' + marker)
+
+    def test_delete_missing_receipt_stays_unknown_and_exit_cancel_retains_input(self):
+        from pmkb.infrastructure.storage.writing import CommitResult, CommitState
+        self.production_window()
+        note = self.save_production_note('not deleted', 'keep me')
+        store = self.window._owned_storage.store
+        self.window.saved_notes.setCurrentRow(0)
+        with patch.object(QMessageBox, 'question', return_value=QMessageBox.StandardButton.Yes), \
+             patch.object(store, 'delete', return_value=CommitResult(CommitState.UNRESOLVED, None, None)):
+            self.window.delete_saved()
+            self.pump(lambda: not self.window._delete_running)
+        self.window.check_saved_delete()
+        self.pump(lambda: not self.window._delete_running)
+        self.assertTrue(self.window.editing.external_pending)
+        self.assertIsNotNone(store.load_note(note.note_id))
+        with patch.object(QMessageBox, 'warning', return_value=QMessageBox.StandardButton.Cancel):
+            self.window.close()
+            self.pump(lambda: not self.window._exit_waiting)
+        self.assertTrue(self.window.isVisible())
+        self.assertEqual(self.window.body.toPlainText(), 'keep me')
+        # Later positive evidence resolves only the original operation.
+        _, _, nid, revision, command, operation = self.window._delete_attempt
+        store.delete(note_id=nid, expected_revision=revision, command_id=command, operation_id=operation)
+        self.window.check_saved_delete()
+        self.pump(lambda: self.window._delete_attempt is None)
+
+    def test_unsaved_reference_preview_resolves_saved_target_and_protects_code(self):
+        self.production_window()
+        target = self.save_production_note('saved target', 'body')
+        cid = self.window.editing.context.collection_id
+        marker = f'[[note:{cid}:{target.note_id}]]'
+        self.window.new_draft()
+        self.window.body.setPlainText(marker + '\n\n`' + marker + '`')
+        self.pump(lambda: '内部引用：saved target' in self.window.preview.toPlainText())
+        self.assertIn(marker, self.window.preview.toPlainText())
+        self.assertEqual(self.window._owned_storage.store.backlinks(target.note_id), ())
+        self.assertEqual(self.window._current().snapshot.body, marker + '\n\n`' + marker + '`')
+
+    def test_stale_list_callback_never_replaces_newer_search(self):
+        import asyncio
+        from threading import Event
+        self.production_window()
+        self.save_production_note('alpha', 'first body')
+        started, release = Event(), Event()
+        store = self.window._owned_storage.store
+        real = store.search
+        def controlled(**kwargs):
+            if kwargs['keyword'] == 'alpha':
+                started.set()
+                release.wait(3)
+            return real(**kwargs)
+        with patch.object(store, 'search', side_effect=controlled):
+            self.window.search_input.setText('alpha')
+            self.window.refresh_saved()
+            self.pump(started.is_set)
+            self.window.search_input.setText('no-match')
+            self.window.refresh_saved()
+            self.pump(lambda: self.window.runtime.pending_count == 1)
+            release.set()
+            self.pump(lambda: self.window.runtime.pending_count == 0 and self.window.dispatcher.pending_count == 0)
+        self.assertEqual(self.window.saved_notes.count(), 0)
+
+    def test_empty_search_invalid_filter_and_unresolved_save_message(self):
+        from pmkb.contracts.common import OperationResult
+        from pmkb.contracts.commit_resolution import CommitCheckReply, CommitCheckState
+        self.production_window()
+        self.save_production_note('alpha', 'body')
+        self.window.search_input.setText('')
+        self.window.run_search()
+        self.assertEqual(self.window.saved_notes.count(), 0)
+        self.assertIn('不能为空', self.window.statusBar().currentMessage())
+        self.window.filter_input.setText('\tAI')
+        self.window.refresh_saved()
+        self.assertEqual(self.window.saved_notes.count(), 0)
+        self.assertIn('INVALID_TAG', self.window.statusBar().currentMessage())
+        context = self.window.editing.context
+        reply = CommitCheckReply('a'*32, 'b'*32, 0, CommitCheckState.UNRESOLVED, None, None)
+        self.window.filter_input.clear()
+        self.window._saved(OperationResult(ResultStatus.OK, context, context, reply, None))
+        self.assertIn('核实尚无结论', self.window.statusBar().currentMessage())
+
+    def test_delete_confirmation_invalidated_by_new_edit(self):
+        self.production_window()
+        note = self.save_production_note('target', 'saved text')
+        self.window.saved_notes.setCurrentRow(0)
+        def confirm(*args):
+            self.window.body.setPlainText('new input during confirmation')
+            return QMessageBox.StandardButton.Yes
+        with patch.object(QMessageBox, 'question', side_effect=confirm):
+            self.window.delete_saved()
+        self.assertIsNone(self.window._delete_attempt)
+        self.assertIsNotNone(self.window._owned_storage.store.load_note(note.note_id))
+        self.assertEqual(self.window.body.toPlainText(), 'new input during confirmation')
+
+    def test_mvp_hidden_scope_and_guarded_saved_selection(self):
+        from pmkb.contracts.common import OperationResult, AppError
+        self.shutdown()
+        self.window = create_main_window(self.root / 'config' / 'collections.json',
+                                        use_collection_storage=True, mvp_mode=True)
+        self.window.show()
+        self.activate()
+        first = self.save_production_note('first', 'first saved')
+        second = self.save_production_note('second', 'second saved')
+        self.assertFalse(self.window.preview.isVisible())
+        self.assertFalse(self.window.tags.isVisible())
+        self.assertFalse(self.window.export_button.isVisible())
+        self.assertFalse(self.window.saved_relations.isVisible())
+        self.assertFalse(self.window.delete_button.isVisible())
+        self.assertFalse(self.window.filter_input.isVisible())
+        self.assertIsNone(self.window.previews.renderer)
+        self.assertIsNone(self.window.export_source)
+        self.assertTrue(self.window.name.isReadOnly())
+        self.window.body.setPlainText('second unsaved')
+        def first_item():
+            return next(self.window.saved_notes.item(i) for i in range(self.window.saved_notes.count())
+                        if self.window.saved_notes.item(i).text() == 'first')
+        with patch.object(self.window, '_ask_leave', return_value=LeaveChoice.CANCEL):
+            self.window.open_saved_item(first_item())
+        self.assertEqual(self.window.body.toPlainText(), 'second unsaved')
+        failure = OperationResult(ResultStatus.ERROR, self.window.editing.context,
+            self.window.editing.context, None, AppError('IO_FAILURE', 'controlled save failure', 'retry'))
+        async def fail(*args):
+            return failure
+        with patch.object(self.window, '_ask_leave', return_value=LeaveChoice.SAVE), \
+             patch.object(self.window.session, 'save_buffer', side_effect=fail):
+            self.window.open_saved_item(first_item())
+            self.pump(lambda: self.window.runtime.pending_count == 0 and self.window.dispatcher.pending_count == 0)
+        self.assertEqual(self.window.body.toPlainText(), 'second unsaved')
+        with patch.object(self.window, '_ask_leave', return_value=LeaveChoice.DISCARD):
+            self.window.open_saved_item(first_item())
+            self.pump(lambda: self.window._current().snapshot.note_id == first.note_id)
+        self.assertEqual(self.window.body.toPlainText(), 'first saved')
+        self.window.body.setPlainText('first changed')
+        second_item = next(self.window.saved_notes.item(i) for i in range(self.window.saved_notes.count())
+                           if self.window.saved_notes.item(i).text() == 'second')
+        with patch.object(self.window, '_ask_leave', return_value=LeaveChoice.SAVE):
+            self.window.open_saved_item(second_item)
+            self.pump(lambda: self.window._current().snapshot.note_id == second.note_id)
+        self.assertEqual(self.window.body.toPlainText(), 'second saved')
+        self.assertEqual(self.window._owned_storage.store.load_note(first.note_id).body, 'first changed')
+        old_context = self.window.editing.context
+        self.window.open_collection(ActivationMode.CREATE, self.root / 'not-allowed')
+        self.assertEqual(self.window.editing.context, old_context)
+        self.assertFalse((self.root / 'not-allowed').exists())
+
+    def test_storage_shutdown_completes_before_new_binding(self):
+        from threading import Event
+        self.production_window()
+        old = self.window._owned_storage
+        started, release, finished = Event(), Event(), Event()
+        real_close, real_bind = old.close, self.window._bind_collection_storage
+        target = self.root / 'serial-target'
+        target.mkdir()
+        def close():
+            started.set()
+            release.wait(3)
+            real_close()
+            finished.set()
+        def bind():
+            self.assertTrue(finished.is_set())
+            real_bind()
+        try:
+            with patch.object(old, 'close', side_effect=close), \
+                 patch.object(self.window, '_bind_collection_storage', side_effect=bind) as binding:
+                self.window.open_collection(ActivationMode.CREATE, target)
+                self.pump(started.is_set)
+                binding.assert_not_called()
+                self.assertTrue(self.window._switching)
+                release.set()
+                self.pump(lambda: not self.window._switching)
+                binding.assert_called_once()
+        finally:
+            release.set()
+
+    def test_final_activation_rejection_restores_usable_old_storage(self):
+        first = self.production_window()
+        note = self.save_production_note('keep', 'old')
+        old, context = self.window._owned_storage, self.window.editing.context
+        real = self.window.editing.install_collection
+        def reject_after_edit(*args, **kwargs):
+            self.assertTrue(old._closed)
+            self.window.body.setPlainText('input before final install')
+            return real(*args, **kwargs)
+        target = self.root / 'rejected-real-target'
+        target.mkdir()
+        with patch.object(self.window.editing, 'install_collection', side_effect=reject_after_edit):
+            self.window.open_collection(ActivationMode.CREATE, target)
+            self.pump(lambda: not self.window._switching)
+        self.assertEqual(self.window.editing.context, context)
+        self.assertEqual(self.window.session.directory, str(first.resolve()))
+        self.assertFalse(self.window._owned_storage._closed)
+        self.assertEqual(self.window.body.toPlainText(), 'input before final install')
+        self.window.save_current()
+        self.pump(lambda: self.window._current().snapshot.base_revision == 2)
+        self.assertEqual(self.window._owned_storage.store.load_note(note.note_id).body,
+                         'input before final install')
+
+    def test_mvp_search_reads_saved_title_body_and_reports_no_results(self):
+        from pmkb.infrastructure.storage.writing import CommitResult, CommitState
+        self.shutdown()
+        self.window = create_main_window(self.root / 'config' / 'collections.json',
+                                        use_collection_storage=True, mvp_mode=True)
+        self.window.show()
+        self.activate()
+        note = self.save_production_note('中文title', 'saved English body\n😀')
+        self.window.body.setPlainText('unsaved keyword')
+        self.window.search_input.setText('keyword')
+        self.window.run_search()
+        self.pump(lambda: self.window.runtime.pending_count == 0 and self.window.dispatcher.pending_count == 0)
+        self.assertEqual(self.window.saved_notes.count(), 0)
+        self.assertIn('没有找到', self.window.saved_state.text())
+        store = self.window._owned_storage.store
+        with patch.object(store, 'save', return_value=CommitResult(CommitState.NOT_COMMITTED, None, None)):
+            self.window.save_current()
+            self.pump(lambda: not self.window.editing.busy)
+        self.assertEqual(self.window.body.toPlainText(), 'unsaved keyword')
+        self.assertTrue(self.window._current().is_dirty)
+        self.assertEqual(store.load_note(note.note_id).body, 'saved English body\n😀')
+        self.window.save_current()
+        self.pump(lambda: self.window._current().snapshot.base_revision == 2)
+        self.pump(lambda: self.window.runtime.pending_count == 0 and self.window.dispatcher.pending_count == 0)
+        self.assertEqual(self.window.saved_notes.count(), 1)
+        for word in ('中文title', 'keyword'):
+            self.window.search_input.setText(word)
+            self.window.run_search()
+            self.pump(lambda: self.window.runtime.pending_count == 0 and self.window.dispatcher.pending_count == 0)
+            self.assertEqual(self.window.saved_notes.count(), 1)
+
     def test_startup_has_no_config_write_or_fake_saved_rows(self):
         self.assertFalse((self.root / 'config').exists())
         self.assertFalse(self.window.new_button.isEnabled())

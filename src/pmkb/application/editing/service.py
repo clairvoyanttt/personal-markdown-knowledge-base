@@ -46,28 +46,26 @@ def version(value, minimum=0):
 
 
 def single_line(value, limit, code):
-    """B input acceptance only. C must revalidate inside the transaction.
-
-    Kept private pending C's shared validator; no name uniqueness lookup here.
-    """
-    if (not isinstance(value, str) or any(ord(c) < 32 or ord(c) == 127
-            or c in '\u2028\u2029' or 0xd800 <= ord(c) <= 0xdfff for c in value)):
-        raise EditingFailure(code, '输入包含控制字符、换行或无效 Unicode。')
-    result = value.strip(TRIM)
-    if not 1 <= len(result) <= limit:
-        raise EditingFailure(code, f'去除首尾空白后须为 1—{limit} 个字符。')
-    return result
+    from pmkb.domain.naming import normalize_name, normalize_tag
+    from pmkb.domain.rules import RuleViolation
+    try:
+        return normalize_name(value).name if code == 'INVALID_NAME' else normalize_tag(value)
+    except RuleViolation as error:
+        raise EditingFailure(code, error.reason, error.action) from error
 
 
 def accepted_tags(tags):
+    from pmkb.domain.naming import normalize_tags
+    from pmkb.domain.rules import RuleViolation
     if not isinstance(tags, (tuple, list)):
         raise EditingFailure('INVALID_TAG', '标签必须是字符串列表。')
-    result = tuple(single_line(t, 30, 'INVALID_TAG') for t in tags)
-    if len(result) != len(set(result)):
-        raise EditingFailure('INVALID_TAG', '标签已存在，请保留原标签列表。')
-    if len(result) > 20:
-        raise EditingFailure('TAG_LIMIT', '每篇笔记最多接受 20 个不同标签。')
-    return result
+    try:
+        normalized = tuple(single_line(tag, 30, 'INVALID_TAG') for tag in tags)
+        if len(set(normalized)) != len(normalized):
+            raise EditingFailure('INVALID_TAG', '标签已存在，请保留原标签列表。')
+        return normalize_tags(normalized)
+    except RuleViolation as error:
+        raise EditingFailure(error.code, error.reason, error.action) from error
 
 
 @dataclass
@@ -87,6 +85,8 @@ class EditingService:
         self._commands: set[str] = set()
         self._pending: SaveAttempt | None = None
         self._inflight = False
+        self.external_busy = False
+        self.external_pending = False
         self._checking = False
         self._exit_authorization: CloseUnconfirmedRequest | None = None
 
@@ -97,17 +97,33 @@ class EditingService:
     @property
     def has_unconfirmed_save(self):
         with self.lock:
-            return self._pending is not None and not self._inflight
+            return (self._pending is not None and not self._inflight) or self.external_pending
 
     @property
     def busy(self):
         with self.lock:
-            return self._inflight or self._checking
+            return self._inflight or self._checking or self.external_busy
 
     @property
     def pending(self):
         with self.lock:
             return self._pending
+
+    def discard_draft(self, context, buffer_id, expected_version):
+        with self.lock:
+            if context != self.context or self.busy or self._pending is not None:
+                return False
+            buffer = self._buffers.get(buffer_id)
+            if buffer is None or buffer.snapshot.edit_version != expected_version:
+                return False
+            del self._buffers[buffer_id]
+            return True
+
+    def finish_saved_delete(self, note_id):
+        with self.lock:
+            for key, buffer in tuple(self._buffers.items()):
+                if buffer.snapshot.note_id == note_id and not buffer.view().is_dirty:
+                    del self._buffers[key]
 
     def views(self):
         with self.lock:
@@ -160,6 +176,8 @@ class EditingService:
         context = getattr(request, 'context', self.context)
         try:
             with self.lock:
+                if self.external_busy or self.external_pending:
+                    raise EditingFailure("STATE_BLOCKED", "请先完成或核实删除。")
                 self._validate_request(request, CreateDraftRequest)
                 signal = self._signal(cancel)
                 if not isinstance(request.initial_name, str):
@@ -179,6 +197,8 @@ class EditingService:
         context = getattr(request, 'context', self.context)
         try:
             with self.lock:
+                if self.external_busy:
+                    raise EditingFailure("STATE_BLOCKED", "删除执行中，暂不接受编辑。")
                 self._validate_request(request, ApplyDraftEditRequest)
                 signal = self._signal(cancel)
                 if (not version(request.expected_edit_version) or not isinstance(request.name, str)
@@ -244,6 +264,8 @@ class EditingService:
             return self._failure(context, EditingFailure('IO_FAILURE', '读取保存版失败，当前草稿未改变。'))
 
     def _readable(self):
+        if self.external_busy or self.external_pending:
+            raise EditingFailure("STATE_BLOCKED", "请先完成或核实删除。")
         if self._pending is not None:
             raise EditingFailure('STATE_BLOCKED', '保存正在进行或待核实，请先等待或核实原命令。')
         if self.storage is None:
@@ -427,7 +449,7 @@ class EditingService:
         The caller refreshes widgets from this immutable new state afterwards.
         """
         with self.lock:
-            if (self.busy or self._pending is not None or expected != self.context
+            if (self.busy or self.external_pending or self._pending is not None or expected != self.context
                     or any(s.is_set() for s in cancel_signals)
                     or tuple(sorted(expected_buffers, key=lambda b: b.buffer_id)) != self.buffers()):
                 return None
