@@ -6,7 +6,7 @@
 
 | 交付 | 审查结论 | 入口 |
 |---|---|---|
-| D：保存版导出源取消与错误映射 | 当前 main+D 完整检查通过；待当前 PR CI 完成成功后合并 | [PR #27](https://github.com/clairvoyanttt/personal-markdown-knowledge-base/pull/27) / `feature/d-export-fix` |
+| D：保存版导出源取消与错误映射 | 当前 main+D 完整检查通过；本轮 PR CI 成功后已合并 PR #27 | [PR #27](https://github.com/clairvoyanttt/personal-markdown-knowledge-base/pull/27) / `feature/d-export-fix` |
 | C：引用面板、导出投影契约测试 | C-W2-REV-01 待修；暂不合并 | [PR #26](https://github.com/clairvoyanttt/personal-markdown-knowledge-base/pull/26) / `feature/c-ref-export-verify` |
 | B：保存版导出、引用展示与插入 | B-W2-REV-01 待修；暂不合并 | [PR #28](https://github.com/clairvoyanttt/personal-markdown-knowledge-base/pull/28) / `feature/b-wave2-export-references` |
 
