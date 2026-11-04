@@ -2,12 +2,16 @@
 import asyncio
 import re
 from html import escape
+from types import SimpleNamespace
 
 from pmkb.application.parsing.document import BlockKind, ProtectedKind
 from pmkb.application.parsing.markdown import parse_markdown
 
 
 class SharedMarkdownPreview:
+    def __init__(self, store=None):
+        self.store = store
+
     async def render(self, context, snapshot, cancel):
         return await asyncio.to_thread(self._render, context, snapshot, cancel)
 
@@ -16,6 +20,26 @@ class SharedMarkdownPreview:
             return ""
         document = parse_markdown(snapshot.body, context.collection_id)
         inline = [s for s in document.protected_spans if s.kind in (ProtectedKind.INLINE_CODE, ProtectedKind.LINK, ProtectedKind.AUTOLINK)]
+        reference_labels = {}
+        if self.store is not None and self.store.collection_id == context.collection_id:
+            from pmkb.application.parsing.document import ReferenceState
+            for ref in self.store.classify(document):
+                occurrence = ref.occurrence
+                name = ref.target_name or '未知目标'
+                if ref.state == ReferenceState.VALID:
+                    label = f'内部引用：{name}'
+                elif ref.state == ReferenceState.DELETED:
+                    label = f'失效引用：{name}（目标已删除，无法跳转）'
+                elif ref.state == ReferenceState.FOREIGN_COLLECTION:
+                    label = '引用来自其他集合，无法跳转'
+                else:
+                    label = '失效引用：未知目标（目标标识不存在或不可用，无法跳转）'
+                reference_labels[occurrence.start_utf16] = label
+                inline.append(SimpleNamespace(kind='INTERNAL_REFERENCE',
+                    start_utf16=occurrence.start_utf16,
+                    end_utf16=occurrence.start_utf16 + occurrence.length_utf16,
+                    length_utf16=occurrence.length_utf16))
+            inline.sort(key=lambda span: span.start_utf16)
         source = snapshot.body.encode('utf-16-le')
         def slice_span(start, length):
             return source[start * 2:(start + length) * 2].decode('utf-16-le')
@@ -47,7 +71,9 @@ class SharedMarkdownPreview:
                 if cursor <= span.start_utf16 and span.end_utf16 <= end:
                     chunks.append(escape(slice_span(cursor, span.start_utf16 - cursor)))
                     code = slice_span(span.start_utf16, span.length_utf16)
-                    if span.kind == ProtectedKind.INLINE_CODE:
+                    if span.kind == 'INTERNAL_REFERENCE':
+                        chunks.append(escape(reference_labels[span.start_utf16]))
+                    elif span.kind == ProtectedKind.INLINE_CODE:
                         chunks.append(f'<code>{escape(code.strip(chr(96)))}</code>')
                     else:
                         match = re.fullmatch(r'\[([^\]]*)\]\(([^\s)]+)\)', code)

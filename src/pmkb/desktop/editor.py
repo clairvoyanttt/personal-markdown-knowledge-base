@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from pathlib import Path
 import secrets
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 
 from PySide6.QtCore import Qt, QSignalBlocker, QTimer
 from PySide6.QtGui import QKeySequence, QShortcut
@@ -87,7 +88,9 @@ class EditorWindow(SavedPanel, StartupWindow):
         self._use_collection_storage = use_collection_storage
         self._owned_storage = None
         self._storage_adapters = []
+        self._storage_retire = None
         if use_collection_storage:
+            self._storage_retire = ThreadPoolExecutor(max_workers=1, thread_name_prefix="pmkb-retire")
             self.runtime.add_finalizer(self._close_collection_storage)
         self.export_source = export_source
         self.previews = PreviewService(self.editing, preview_renderer)
@@ -193,8 +196,8 @@ class EditorWindow(SavedPanel, StartupWindow):
         self.preview.setOpenExternalLinks(False)
         self.preview.setPlainText('等待 C 的统一解析接口；尚未实现六类 Markdown 预览验收。')
         right_layout.addWidget(self.preview)
-        right_layout.addWidget(QLabel('引用 / 反向引用 / 删除 / 导出 / 备份 / 恢复'))
-        pending = QLabel('相应服务及精确契约尚待接入。未保存草稿不会作为保存版输出。')
+        right_layout.addWidget(QLabel('保存版查询与引用位于左侧；导出使用已保存版本。'))
+        pending = QLabel('备份与恢复界面尚未接入。未保存草稿不会作为保存版输出。')
         pending.setWordWrap(True)
         right_layout.addWidget(pending)
         splitter.addWidget(right)
@@ -207,10 +210,13 @@ class EditorWindow(SavedPanel, StartupWindow):
             self._draft_text_inputs[self._active_buffer] = text
 
     async def _close_collection_storage(self):
+        if self._storage_retire is not None:
+            await asyncio.to_thread(self._storage_retire.shutdown, wait=True)
         for adapter in self._storage_adapters:
             await asyncio.to_thread(adapter.close)
 
     def _bind_collection_storage(self):
+        previous = self._owned_storage
         context = self.editing.context
         store = CollectionStore(Path(self.session.directory) / 'knowledge.sqlite',
                                 context.collection_id)
@@ -220,6 +226,14 @@ class EditorWindow(SavedPanel, StartupWindow):
         self._storage_adapters.append(adapter)
         self._owned_storage = self.editing.storage = adapter
         self.export_source = CExportSource(store)
+        from pmkb.desktop.markdown_preview import SharedMarkdownPreview
+        if isinstance(self.previews.renderer, SharedMarkdownPreview):
+            self.previews.renderer = SharedMarkdownPreview(store)
+        if previous is not None and self._storage_retire is not None:
+            try:
+                self._storage_retire.submit(previous.close)
+            except RuntimeError:
+                pass  # Shutdown finalizer still owns previous; never abandon it.
 
     def _install_collection_view(self):
         """Final Qt activation boundary, not a later outcome presentation.
@@ -265,7 +279,7 @@ class EditorWindow(SavedPanel, StartupWindow):
         self.new_button.setEnabled(active and not self._exit_waiting and not self._switching)
         self.save_button.setEnabled(self._active_buffer is not None and not self.editing.busy
             and not self.editing.has_unconfirmed_save and not self._switching)
-        self.check_button.setEnabled(self.editing.has_unconfirmed_save and not self.editing.busy)
+        self.check_button.setEnabled(self.editing.pending is not None and not self.editing.busy)
         for widget in (self.name, self.body, self.tag_input, self.tags):
             widget.setEnabled(self._active_buffer is not None and not self._exit_waiting)
         view = self._current()
@@ -281,7 +295,9 @@ class EditorWindow(SavedPanel, StartupWindow):
             self.tags.clear()
             if view:
                 self.tags.addItems(view.snapshot.tags)
-        if self.editing.has_unconfirmed_save:
+        if self.editing.external_pending:
+            state = '删除结果待核实；请使用“核实删除结果”，当前输入不会作为保存版输出。'
+        elif self.editing.has_unconfirmed_save:
             state = '保存结果待核实；显示最后确认事实，仍可保留内存编辑，禁止重复保存。'
         elif self.editing.busy:
             state = '正在保存 / 核实；当前输入仍可编辑。'
@@ -500,6 +516,8 @@ class EditorWindow(SavedPanel, StartupWindow):
                 self.statusBar().showMessage('核实完成：原保存已确认未提交；草稿保留，可手动重新保存。')
             elif result.value.state == CommitCheckState.COMMITTED:
                 self.statusBar().showMessage('核实完成：原保存的捕获版本已提交；后续编辑仍须另行保存。')
+            elif result.value.state == CommitCheckState.UNRESOLVED:
+                self.statusBar().showMessage('核实尚无结论：保留待核实状态，不能确认已提交或未提交。')
         self._refresh()
 
     def _request_preview(self):
@@ -633,6 +651,14 @@ class EditorWindow(SavedPanel, StartupWindow):
         if self.runtime.pending_count or self.dispatcher.pending_count or self.editing.busy or self._switching:
             return
         self._stop_exit_poll()
+        if self.editing.external_pending:
+            answer = QMessageBox.warning(self, '删除结果待核实',
+                '删除可能已提交。建议取消退出并核实原命令；关闭不代表撤销删除，是否仍退出？',
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel)
+            if not self._exit_waiting or answer != QMessageBox.StandardButton.Yes:
+                self._resume_exit()
+                return
         pending = self.editing.pending
         if pending is not None:
             confirmed_versions = {v.snapshot.buffer_id: v.snapshot.edit_version for v in self.editing.views()}

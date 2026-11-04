@@ -85,6 +85,8 @@ class EditingService:
         self._commands: set[str] = set()
         self._pending: SaveAttempt | None = None
         self._inflight = False
+        self.external_busy = False
+        self.external_pending = False
         self._checking = False
         self._exit_authorization: CloseUnconfirmedRequest | None = None
 
@@ -95,17 +97,23 @@ class EditingService:
     @property
     def has_unconfirmed_save(self):
         with self.lock:
-            return self._pending is not None and not self._inflight
+            return (self._pending is not None and not self._inflight) or self.external_pending
 
     @property
     def busy(self):
         with self.lock:
-            return self._inflight or self._checking
+            return self._inflight or self._checking or self.external_busy
 
     @property
     def pending(self):
         with self.lock:
             return self._pending
+
+    def finish_saved_delete(self, note_id):
+        with self.lock:
+            for key, buffer in tuple(self._buffers.items()):
+                if buffer.snapshot.note_id == note_id and not buffer.view().is_dirty:
+                    del self._buffers[key]
 
     def views(self):
         with self.lock:
@@ -158,6 +166,8 @@ class EditingService:
         context = getattr(request, 'context', self.context)
         try:
             with self.lock:
+                if self.external_busy or self.external_pending:
+                    raise EditingFailure("STATE_BLOCKED", "请先完成或核实删除。")
                 self._validate_request(request, CreateDraftRequest)
                 signal = self._signal(cancel)
                 if not isinstance(request.initial_name, str):
@@ -177,6 +187,8 @@ class EditingService:
         context = getattr(request, 'context', self.context)
         try:
             with self.lock:
+                if self.external_busy:
+                    raise EditingFailure("STATE_BLOCKED", "删除执行中，暂不接受编辑。")
                 self._validate_request(request, ApplyDraftEditRequest)
                 signal = self._signal(cancel)
                 if (not version(request.expected_edit_version) or not isinstance(request.name, str)
@@ -242,6 +254,8 @@ class EditingService:
             return self._failure(context, EditingFailure('IO_FAILURE', '读取保存版失败，当前草稿未改变。'))
 
     def _readable(self):
+        if self.external_busy or self.external_pending:
+            raise EditingFailure("STATE_BLOCKED", "请先完成或核实删除。")
         if self._pending is not None:
             raise EditingFailure('STATE_BLOCKED', '保存正在进行或待核实，请先等待或核实原命令。')
         if self.storage is None:
@@ -425,7 +439,7 @@ class EditingService:
         The caller refreshes widgets from this immutable new state afterwards.
         """
         with self.lock:
-            if (self.busy or self._pending is not None or expected != self.context
+            if (self.busy or self.external_pending or self._pending is not None or expected != self.context
                     or any(s.is_set() for s in cancel_signals)
                     or tuple(sorted(expected_buffers, key=lambda b: b.buffer_id)) != self.buffers()):
                 return None
