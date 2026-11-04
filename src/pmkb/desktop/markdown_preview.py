@@ -15,7 +15,7 @@ class SharedMarkdownPreview:
         if cancel.is_set():
             return ""
         document = parse_markdown(snapshot.body, context.collection_id)
-        inline = [s for s in document.protected_spans if s.kind == ProtectedKind.INLINE_CODE]
+        inline = [s for s in document.protected_spans if s.kind in (ProtectedKind.INLINE_CODE, ProtectedKind.LINK, ProtectedKind.AUTOLINK)]
         source = snapshot.body.encode('utf-16-le')
         def slice_span(start, length):
             return source[start * 2:(start + length) * 2].decode('utf-16-le')
@@ -47,7 +47,16 @@ class SharedMarkdownPreview:
                 if cursor <= span.start_utf16 and span.end_utf16 <= end:
                     chunks.append(escape(slice_span(cursor, span.start_utf16 - cursor)))
                     code = slice_span(span.start_utf16, span.length_utf16)
-                    chunks.append(f'<code>{escape(code.strip(chr(96)))}</code>')
+                    if span.kind == ProtectedKind.INLINE_CODE:
+                        chunks.append(f'<code>{escape(code.strip(chr(96)))}</code>')
+                    else:
+                        match = re.fullmatch(r'\[([^\]]*)\]\(([^\s)]+)\)', code)
+                        url = match[2] if match else code[1:-1] if span.kind == ProtectedKind.AUTOLINK else ''
+                        label = match[1] if match else code
+                        if url.lower().startswith(('https://', 'http://', 'mailto:')):
+                            chunks.append(f'<a href="{escape(url, quote=True)}">{escape(label)}</a>')
+                        else:
+                            chunks.append(escape(code))
                     cursor = span.end_utf16
             chunks.append(escape(slice_span(cursor, end - cursor)))
             content = ''.join(chunks).strip()
@@ -62,4 +71,6 @@ class SharedMarkdownPreview:
                 parts.append(f'<{container}><li>{content.removeprefix(escape(marker)).lstrip()}</li></{container}>')
             else:
                 parts.append(f'<p>{content}</p>')
-        return ''.join(parts)
+        html = ''.join(parts)
+        # Join adjacent list items so ordered numbering continues.
+        return html.replace('</ol><ol>', '').replace('</ul><ul>', '')

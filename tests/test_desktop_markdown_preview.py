@@ -42,3 +42,11 @@ class PreviewRenderingTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 release.set()
             self.assertEqual(await task, '')
+
+
+    async def test_links_and_continuous_numbered_list(self):
+        html = await SharedMarkdownPreview().render(SimpleNamespace(collection_id='a'*32),
+            SimpleNamespace(body='[site](https://example.com)\n\n1. one\n2. two'), Event())
+        self.assertIn('<a href="https://example.com">site</a>', html)
+        self.assertEqual(html.count('<ol>'), 1)
+        self.assertEqual(html.count('<li>'), 2)

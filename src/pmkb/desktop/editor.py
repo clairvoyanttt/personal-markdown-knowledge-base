@@ -36,6 +36,8 @@ from pmkb.desktop.editor_session import EditorSession
 
 from pmkb.infrastructure.storage.editing_storage import SqliteEditingStorage
 from pmkb.infrastructure.storage.store import CollectionStore
+from pmkb.infrastructure.storage.export_source import CExportSource
+from pmkb.desktop.saved_panel import SavedPanel
 
 
 class LocalPreview(QTextBrowser):
@@ -72,7 +74,7 @@ class CapturedExportSource:
         return None
 
 
-class EditorWindow(StartupWindow):
+class EditorWindow(SavedPanel, StartupWindow):
     def __init__(self, config_file: Path, storage=None, preview_renderer=None, *, export_source=None, use_collection_storage=False):
         config_file = Path(config_file)
         if not config_file.is_absolute():
@@ -123,7 +125,7 @@ class EditorWindow(StartupWindow):
             row.addWidget(button)
         row.addWidget(self.location, 1)
         layout.addLayout(row)
-        self.notice = QLabel('开发状态：内存草稿可编辑；真实保存、查询与预览须接入 C 服务。')
+        self.notice = QLabel('编辑区显示会话草稿；列表、查询和导出使用已保存版本。')
         self.notice.setWordWrap(True)
         layout.addWidget(self.notice)
         splitter = QSplitter()
@@ -137,9 +139,7 @@ class EditorWindow(StartupWindow):
         self.drafts.currentItemChanged.connect(self._select_draft)
         left_layout.addWidget(self.drafts)
         left_layout.addWidget(QLabel('保存版列表 / 搜索 / 标签筛选'))
-        unavailable = QLabel('等待 C 的保存版查询接口；不使用草稿冒充查询结果。')
-        unavailable.setWordWrap(True)
-        left_layout.addWidget(unavailable)
+        self.build_saved_panel(left_layout)
         splitter.addWidget(left)
         center = QWidget()
         form = QVBoxLayout(center)
@@ -219,6 +219,7 @@ class EditorWindow(StartupWindow):
         # Installing a collection must not submit new work during shutdown.
         self._storage_adapters.append(adapter)
         self._owned_storage = self.editing.storage = adapter
+        self.export_source = CExportSource(store)
 
     def _install_collection_view(self):
         """Final Qt activation boundary, not a later outcome presentation.
@@ -230,6 +231,7 @@ class EditorWindow(StartupWindow):
         """
         if self._use_collection_storage:
             self._bind_collection_storage()
+        self._saved_revision = -1
         self._active_buffer = None
         self._draft_text_inputs.clear()
         self._preview_timer.stop()
@@ -238,6 +240,7 @@ class EditorWindow(StartupWindow):
         # this transition. Clear completed render output at the same boundary.
         self.preview.setPlainText('请选择草稿。' if self.previews.renderer else '等待 C 的统一解析接口。')
         self._refresh(refresh_text=True)
+        self.refresh_saved()
 
     def _current(self):
         return self.editing.view(self._active_buffer) if self._active_buffer else None
@@ -491,6 +494,7 @@ class EditorWindow(StartupWindow):
 
     def _saved(self, result):
         self._show_result(result)
+        self.refresh_saved()
         if result.status == ResultStatus.OK and isinstance(result.value, CommitCheckReply):
             if result.value.state == CommitCheckState.NOT_COMMITTED:
                 self.statusBar().showMessage('核实完成：原保存已确认未提交；草稿保留，可手动重新保存。')

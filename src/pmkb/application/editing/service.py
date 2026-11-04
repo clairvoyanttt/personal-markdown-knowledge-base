@@ -46,28 +46,26 @@ def version(value, minimum=0):
 
 
 def single_line(value, limit, code):
-    """B input acceptance only. C must revalidate inside the transaction.
-
-    Kept private pending C's shared validator; no name uniqueness lookup here.
-    """
-    if (not isinstance(value, str) or any(ord(c) < 32 or ord(c) == 127
-            or c in '\u2028\u2029' or 0xd800 <= ord(c) <= 0xdfff for c in value)):
-        raise EditingFailure(code, '输入包含控制字符、换行或无效 Unicode。')
-    result = value.strip(TRIM)
-    if not 1 <= len(result) <= limit:
-        raise EditingFailure(code, f'去除首尾空白后须为 1—{limit} 个字符。')
-    return result
+    from pmkb.domain.naming import normalize_name, normalize_tag
+    from pmkb.domain.rules import RuleViolation
+    try:
+        return normalize_name(value).name if code == 'INVALID_NAME' else normalize_tag(value)
+    except RuleViolation as error:
+        raise EditingFailure(code, error.reason, error.action) from error
 
 
 def accepted_tags(tags):
+    from pmkb.domain.naming import normalize_tags
+    from pmkb.domain.rules import RuleViolation
     if not isinstance(tags, (tuple, list)):
         raise EditingFailure('INVALID_TAG', '标签必须是字符串列表。')
-    result = tuple(single_line(t, 30, 'INVALID_TAG') for t in tags)
-    if len(result) != len(set(result)):
-        raise EditingFailure('INVALID_TAG', '标签已存在，请保留原标签列表。')
-    if len(result) > 20:
-        raise EditingFailure('TAG_LIMIT', '每篇笔记最多接受 20 个不同标签。')
-    return result
+    try:
+        normalized = tuple(single_line(tag, 30, 'INVALID_TAG') for tag in tags)
+        if len(set(normalized)) != len(normalized):
+            raise EditingFailure('INVALID_TAG', '标签已存在，请保留原标签列表。')
+        return normalize_tags(normalized)
+    except RuleViolation as error:
+        raise EditingFailure(error.code, error.reason, error.action) from error
 
 
 @dataclass

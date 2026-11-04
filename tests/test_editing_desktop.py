@@ -224,6 +224,33 @@ class EditorDesktopTests(unittest.TestCase):
         self.assertTrue(first._closed)
         self.assertTrue(second._closed)
 
+    def test_saved_list_search_reopen_and_real_export_source(self):
+        import asyncio
+        from threading import Event
+        self.shutdown()
+        self.window = create_main_window(self.root / 'config' / 'collections.json',
+                                        use_collection_storage=True)
+        self.window.show()
+        self.activate()
+        self.window.new_draft()
+        self.window.name.setText('searchable')
+        self.window._apply_name()
+        self.window.body.setPlainText('saved content')
+        self.window.save_current()
+        self.pump(lambda: self.window._current().snapshot.base_revision == 1)
+        self.pump(lambda: self.window.saved_notes.count() == 1)
+        note_id = self.window._current().snapshot.note_id
+        self.window.body.setPlainText('unsaved input')
+        self.window.open_saved_item(self.window.saved_notes.item(0))
+        self.pump(lambda: self.window.runtime.pending_count == 0 and self.window.dispatcher.pending_count == 0)
+        self.assertEqual(self.window.body.toPlainText(), 'unsaved input')
+        saved = asyncio.run(self.window.export_source.read_saved(self.window.editing.context, note_id, Event()))
+        self.assertEqual(saved.saved_body, 'saved content')
+        self.window.search_input.setText('not found')
+        self.window.refresh_saved()
+        self.pump(lambda: self.window.runtime.pending_count == 0 and self.window.dispatcher.pending_count == 0)
+        self.assertEqual(self.window.saved_notes.count(), 0)
+
     def test_startup_has_no_config_write_or_fake_saved_rows(self):
         self.assertFalse((self.root / 'config').exists())
         self.assertFalse(self.window.new_button.isEnabled())
