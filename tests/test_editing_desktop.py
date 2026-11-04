@@ -205,9 +205,24 @@ class EditorDesktopTests(unittest.TestCase):
         self.pump(lambda: '<img src=x>' in self.window.preview.toPlainText())
         old = self.window._owned_storage
         self.activate('second')
-        self.pump(lambda: old._closed)
+        self.assertIn(old, self.window._storage_adapters)
         self.assertIsNot(self.window.editing.storage, old)
         self.assertFalse(self.window.editing.views())
+
+    def test_storage_rebind_needs_no_runtime_submit_and_finalizer_closes_all(self):
+        import asyncio
+        self.activate()
+        self.window._bind_collection_storage()
+        first = self.window._owned_storage
+        with patch.object(self.window.runtime, 'submit', side_effect=RuntimeError('closed')) as submit:
+            self.window._bind_collection_storage()
+            submit.assert_not_called()
+        second = self.window._owned_storage
+        self.assertIs(self.window.editing.storage, second)
+        self.assertIsNot(first, second)
+        asyncio.run(self.window._close_collection_storage())
+        self.assertTrue(first._closed)
+        self.assertTrue(second._closed)
 
     def test_startup_has_no_config_write_or_fake_saved_rows(self):
         self.assertFalse((self.root / 'config').exists())

@@ -84,6 +84,7 @@ class EditorWindow(StartupWindow):
         self.services = ApplicationServices.compose(self.session, config_file, self.runtime)
         self._use_collection_storage = use_collection_storage
         self._owned_storage = None
+        self._storage_adapters = []
         if use_collection_storage:
             self.runtime.add_finalizer(self._close_collection_storage)
         self.export_source = export_source
@@ -206,19 +207,18 @@ class EditorWindow(StartupWindow):
             self._draft_text_inputs[self._active_buffer] = text
 
     async def _close_collection_storage(self):
-        if self._owned_storage is not None:
-            await asyncio.to_thread(self._owned_storage.close)
+        for adapter in self._storage_adapters:
+            await asyncio.to_thread(adapter.close)
 
     def _bind_collection_storage(self):
-        previous = self._owned_storage
         context = self.editing.context
         store = CollectionStore(Path(self.session.directory) / 'knowledge.sqlite',
                                 context.collection_id)
-        self._owned_storage = self.editing.storage = SqliteEditingStorage(store)
-        if previous is not None:
-            async def retire(cancel):
-                await asyncio.to_thread(previous.close)
-            self.runtime.submit(retire)
+        adapter = SqliteEditingStorage(store)
+        # Keep every adapter under the already registered shutdown finalizer.
+        # Installing a collection must not submit new work during shutdown.
+        self._storage_adapters.append(adapter)
+        self._owned_storage = self.editing.storage = adapter
 
     def _install_collection_view(self):
         """Final Qt activation boundary, not a later outcome presentation.
