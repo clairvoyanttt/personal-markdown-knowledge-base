@@ -53,11 +53,16 @@ class SavedNoteData:
 
 @dataclass(frozen=True, slots=True)
 class NoteSummary:
-    """One saved-version row for the search/list view."""
+    """One saved-version row for the search/list view.
+
+    ``tags`` are the saved tags (exact case, saved order is not significant) so a
+    list or tag filter never has to re-read the note or guess from a draft.
+    """
 
     note_id: str
     name: str
     revision: int
+    tags: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -193,13 +198,35 @@ def load_note(database: str | Path, collection_id: str, note_id: str) -> SavedNo
     return SavedNoteData(note_id, row[2], row[0], row[1], tags)
 
 
-def list_summaries(database: str | Path, collection_id: str) -> tuple[NoteSummary, ...]:
-    """All saved notes in stable name order (empty when the collection is empty)."""
+def list_summaries(database: str | Path, collection_id: str, *,
+                   tags: object = ()) -> tuple[NoteSummary, ...]:
+    """All saved notes in stable name order, optionally filtered by saved tags.
+
+    ``tags`` uses AND semantics with exact case (``AI`` and ``ai`` differ) and
+    never trims or folds the caller's value; the shared input rule validates it.
+    A filter that matches nothing returns an empty tuple, not an error.
+    """
+    accepted_tags = _filter_tags(tags)
     with _read_transaction(database, collection_id) as (reader, _metadata):
         rows = reader.execute(
             "SELECT noteId, name, revision FROM Notes ORDER BY lower(name), noteId"
         ).fetchall()
-    return tuple(NoteSummary(*row) for row in rows)
+        saved_tags = _tags_by_note(reader)
+    summaries = [
+        NoteSummary(note_id, name, revision, saved_tags.get(note_id, ()))
+        for note_id, name, revision in rows
+    ]
+    if accepted_tags:
+        wanted = set(accepted_tags)
+        summaries = [item for item in summaries if wanted <= set(item.tags)]
+    return tuple(summaries)
+
+
+def _tags_by_note(reader: sqlite3.Connection) -> dict[str, tuple[str, ...]]:
+    grouped: dict[str, list[str]] = {}
+    for note_id, tag in reader.execute("SELECT noteId, tag FROM NoteTags ORDER BY noteId, tag"):
+        grouped.setdefault(note_id, []).append(tag)
+    return {note_id: tuple(values) for note_id, values in grouped.items()}
 
 
 def search_notes(
@@ -237,8 +264,14 @@ def search_notes(
             parameters.append(len(accepted_tags))
         sql += " ORDER BY lower(n.name), n.noteId"
         rows = reader.execute(sql, parameters).fetchall()
-    return SearchPage(text, accepted_tags, tuple(NoteSummary(*row) for row in rows),
-                      metadata.collection_revision)
+        saved_tags = _tags_by_note(reader)
+    return SearchPage(
+        text,
+        accepted_tags,
+        tuple(NoteSummary(note_id, name, revision, saved_tags.get(note_id, ()))
+              for note_id, name, revision in rows),
+        metadata.collection_revision,
+    )
 
 
 def list_backlinks(database: str | Path, collection_id: str, note_id: str) -> tuple[BacklinkSource, ...]:
@@ -390,13 +423,25 @@ def capture_snapshot(database: str | Path) -> CollectionSnapshot:
 
 
 def _filter_tags(tags: object) -> tuple[str, ...]:
+    """Validate filter tags without rewriting them (query side has no trimming).
+
+    The editor normalizes user input before saving, so a filter value must already
+    equal its saved form. Accepting ``" AI "`` here would silently perform an
+    implicit trim and could hide a mismatch between UI input and stored data.
+    """
     if tags is None:
         return ()
     if isinstance(tags, str) or not isinstance(tags, (tuple, list)):
         raise RuleViolation("INVALID_TAG", "Tags for filtering must be a sequence of tag strings.")
     accepted: list[str] = []
     for tag in tags:
-        value = normalize_tag(tag)
+        value = require_text(tag, "Filter tag")
+        if normalize_tag(value) != value:
+            raise RuleViolation(
+                "INVALID_TAG",
+                "Filter tags must be used exactly as saved (already trimmed, 1-30 code points).",
+                "Normalize the tag input before filtering; the query side does not trim or fold.",
+            )
         if value not in accepted:
             accepted.append(value)
     return tuple(accepted)

@@ -112,8 +112,9 @@ class CollectionStore:
     def load_note(self, note_id: str) -> SavedNoteData | None:
         return reader.load_note(self._database, self._collection_id, note_id)
 
-    def summaries(self) -> tuple[NoteSummary, ...]:
-        return reader.list_summaries(self._database, self._collection_id)
+    def summaries(self, *, tags: tuple[str, ...] = ()) -> tuple[NoteSummary, ...]:
+        """Saved notes (and their saved tags), optionally filtered by tags (AND)."""
+        return reader.list_summaries(self._database, self._collection_id, tags=tags)
 
     def search(self, *, keyword: str, tags: tuple[str, ...] = ()) -> SearchPage:
         return reader.search_notes(self._database, self._collection_id, keyword=keyword, tags=tags)
