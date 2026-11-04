@@ -8,12 +8,14 @@ from several independent reads.
 """
 from __future__ import annotations
 
-import asyncio
 from threading import Event
 
 from pmkb.application.export.rendering import ExportReference, ReferenceKind
 from pmkb.application.export.service import SavedExportNote
+from pmkb.application.output_support import OutputFailure, run_io, validate_context
 from pmkb.contracts.common import CallContext
+from pmkb.domain.identity import require_identifier
+from pmkb.domain.rules import RuleViolation
 from pmkb.infrastructure.storage.connection import StorageFailure
 from pmkb.infrastructure.storage.store import CollectionStore
 
@@ -32,26 +34,28 @@ class CExportSource:
                          cancel: Event) -> SavedExportNote | None:
         """Read the saved note and its classified references from one snapshot.
 
-        ``None`` means there is no saved version (CB01). A read never promotes a
-        draft or writes anything; stale context is rejected instead of exporting
-        data from another collection.
+        Check ``cancel`` before interpreting ``None`` as no saved version (CB01).
+        Cancellation waits for the in-flight read and discards its outcome.
+        A read never promotes a draft or writes anything; stale context is
+        rejected before accessing another collection.
         """
-        if not isinstance(context, CallContext):
-            raise StorageFailure("INVALID_ARGUMENT", "A call context is required.")
+        if cancel.is_set():
+            return None
+        validate_context(context)
         if context.collection_id != self._store.collection_id:
-            raise StorageFailure(
+            raise OutputFailure(
                 "STALE_CONTEXT", "The export source belongs to another collection.",
                 "Export from the collection that is actually open.",
             )
-        if not isinstance(note_id, str):
-            raise StorageFailure("INVALID_ARGUMENT", "A saved note identity is required.")
-        if cancel.is_set():
-            # D decides the returned status; a read has no persistent effect.
-            raise asyncio.CancelledError()
-        view = await asyncio.to_thread(self._store.saved_view, note_id)
-        if cancel.is_set():
-            raise asyncio.CancelledError()
-        if view is None:
+        try:
+            require_identifier(note_id, "Note identity")
+            view = await run_io(lambda: self._store.saved_view(note_id), cancel)
+        except (RuleViolation, StorageFailure) as error:
+            if cancel.is_set():
+                return None
+            raise OutputFailure(error.code, error.reason, error.action,
+                                unknown=getattr(error, "unknown", False)) from error
+        if cancel.is_set() or view is None:
             return None
         references = tuple(
             ExportReference(
